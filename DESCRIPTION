@@ -23,4 +23,6 @@ Imports:
 Suggests:
     testthat (>= 3.0.0),
     webshot2
+Remotes:
+    belian-earth/a5R
 Config/testthat/edition: 3
