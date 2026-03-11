@@ -1,0 +1,13 @@
+dependencies:
+  - name: deckgl
+    version: 9.2
+    src:
+      href: https://unpkg.com/deck.gl@^9.2.0
+    script:
+      - dist.min.js
+  - name: deckgl-geo-layers
+    version: 9.2
+    src:
+      href: https://unpkg.com/@deck.gl/geo-layers@^9.2.0
+    script:
+      - dist.min.js
