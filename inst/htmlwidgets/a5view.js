@@ -367,15 +367,22 @@ HTMLWidgets.widget({
             if (deckgl && lastPayload) {
               deckgl.setProps({ layers: buildLayers(lastPayload) });
             }
+            // Send hover event to Shiny
+            if (typeof Shiny !== "undefined" && Shiny.setInputValue) {
+              Shiny.setInputValue(el.id + "_hover", newHover, {priority: "event"});
+            }
           }
         },
         onClick: function(info) {
           if (info && info.object) {
-            // Toggle: click same cell again to dismiss
             var id = info.object.pentagon;
             clickedPentagon = (clickedPentagon === id) ? null : id;
             if (deckgl && lastPayload) {
               deckgl.setProps({ layers: buildLayers(lastPayload) });
+            }
+            // Send click event to Shiny
+            if (typeof Shiny !== "undefined" && Shiny.setInputValue) {
+              Shiny.setInputValue(el.id + "_click", clickedPentagon, {priority: "event"});
             }
           }
         },
@@ -384,7 +391,7 @@ HTMLWidgets.widget({
         getLineWidth: x.line_width || 1,
         lineWidthUnits: "pixels",
         updateTriggers: {
-          getFillColor: [x.fill_is_column, x.fill_color]
+          getFillColor: [x.fill_is_column, x.fill_color, x.fill_per_cell, x.data.length]
         }
       };
 
@@ -428,6 +435,21 @@ HTMLWidgets.widget({
 
     return {
       renderValue: function(x) {
+        // Convert columnar data to row objects
+        if (x.columns && !x.data) {
+          var keys = Object.keys(x.columns);
+          var n = x.columns[keys[0]].length;
+          var rows = new Array(n);
+          for (var i = 0; i < n; i++) {
+            var row = {};
+            for (var k = 0; k < keys.length; k++) {
+              row[keys[k]] = x.columns[keys[k]][i];
+            }
+            rows[i] = row;
+          }
+          x.data = rows;
+        }
+
         lastPayload = x;
         currentOpacity = x.opacity;
 
@@ -479,7 +501,23 @@ HTMLWidgets.widget({
             controller: true,
             layers: layers,
             getTooltip: tooltipFn,
+            onHover: function(info) {
+              // Send cursor lat/lon to Shiny (fires over any part of the map)
+              if (typeof Shiny !== "undefined" && Shiny.setInputValue && info && info.coordinate) {
+                Shiny.setInputValue(el.id + "_cursor", {
+                  lng: info.coordinate[0],
+                  lat: info.coordinate[1]
+                });
+              }
+            },
             onClick: function(info) {
+              // Send click lat/lon to Shiny
+              if (typeof Shiny !== "undefined" && Shiny.setInputValue && info && info.coordinate) {
+                Shiny.setInputValue(el.id + "_click_coord", {
+                  lng: info.coordinate[0],
+                  lat: info.coordinate[1]
+                }, {priority: "event"});
+              }
               // Click empty space → clear clicked state
               if (!info || !info.object) {
                 if (clickedPentagon) {

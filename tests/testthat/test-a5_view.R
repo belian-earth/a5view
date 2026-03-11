@@ -215,12 +215,12 @@ test_that("a5_view sets sizing policy with zero padding", {
 
 # --- Data payload ---
 
-test_that("a5_view payload data is row-oriented list", {
+test_that("a5_view payload uses columnar data", {
   cells <- make_cells(3)
   w <- a5_view(cells)
-  expect_true(is.list(w$x$data))
-  expect_length(w$x$data, 3)
-  expect_true("pentagon" %in% names(w$x$data[[1]]))
+  expect_true(is.list(w$x$columns))
+  expect_true("pentagon" %in% names(w$x$columns))
+  expect_length(w$x$columns$pentagon, 3)
 })
 
 # --- Shiny bindings ---

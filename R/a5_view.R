@@ -120,16 +120,15 @@ a5_view <- function(
   # --- Auto-center view ---
   view_state <- auto_view(df[["pentagon"]], lng, lat, zoom)
 
-  # --- Build JS payload ---
-  data_rows <- lapply(
-    seq_len(nrow(df)),
-    function(i) as.list(df[i, , drop = FALSE])
-  )
+  # --- Build JS payload (columnar for compact JSON) ---
+  columns <- lapply(df, function(col) {
+    if (is.list(col)) col else unname(col)
+  })
 
   has_per_cell_rgba <- "_fill_rgba" %in% names(df)
 
   payload <- list(
-    data = data_rows,
+    columns = columns,
     fill_is_column = fill_payload$fill_is_column,
     fill_color = fill_payload$fill_color,
     fill_per_cell = has_per_cell_rgba,
