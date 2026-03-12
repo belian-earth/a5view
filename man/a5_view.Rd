@@ -8,7 +8,7 @@ a5_view(
   cells,
   fill = "#74ac90ff",
   palette = "Viridis",
-  opacity = 0.6,
+  opacity = 0.3,
   tooltip = TRUE,
   elevation = NULL,
   elevation_scale = 1,
@@ -19,6 +19,7 @@ a5_view(
   lng = NULL,
   lat = NULL,
   zoom = NULL,
+  globe = FALSE,
   basemap = c("dark", "light", "osm", "satellite")
 )
 }
@@ -63,6 +64,9 @@ Default: \code{1}.}
 
 \item{lng, lat, zoom}{Initial map view. If \code{NULL} (default),
 auto-centres on the cell centroids.}
+
+\item{globe}{Logical. Use a 3D globe projection instead of the
+default Mercator map. Default: \code{FALSE}.}
 
 \item{basemap}{Character vector of basemap styles to make available.
 Options are \code{"dark"}, \code{"light"}, \code{"osm"}, and \code{"satellite"}. The

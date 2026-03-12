@@ -98,25 +98,36 @@ attach_fill <- function(df, fill_resolved, prepared, palette) {
         "Column {.val {fill_resolved$col}} must be numeric for fill mapping, not {.obj_type_friendly {col_vals}}."
       )
     }
-    df[["_fill_value"]] <- as.numeric(col_vals)
-    pal_colors <- resolve_palette(palette, 8L)
+    vals <- as.numeric(col_vals)
+    domain <- range(vals, na.rm = TRUE)
+    rgba <- values_to_rgba(vals, domain, palette)
+    df[["_fill_value"]] <- vals
+    df[["_fill_r"]] <- rgba$r
+    df[["_fill_g"]] <- rgba$g
+    df[["_fill_b"]] <- rgba$b
+    df[["_fill_a"]] <- rgba$a
     list(
       df = df,
       fill_is_column = TRUE,
       fill_color = NULL,
-      js_palette = lapply(pal_colors, hex_to_rgba),
-      domain = range(col_vals, na.rm = TRUE)
+      js_palette = NULL,
+      domain = domain
     )
   } else if (fill_resolved$type == "numeric") {
     vals_sub <- fill_resolved$values[prepared$not_na]
+    domain <- range(vals_sub, na.rm = TRUE)
+    rgba <- values_to_rgba(vals_sub, domain, palette)
     df[["_fill_value"]] <- vals_sub
-    pal_colors <- resolve_palette(palette, 8L)
+    df[["_fill_r"]] <- rgba$r
+    df[["_fill_g"]] <- rgba$g
+    df[["_fill_b"]] <- rgba$b
+    df[["_fill_a"]] <- rgba$a
     list(
       df = df,
       fill_is_column = TRUE,
       fill_color = NULL,
-      js_palette = lapply(pal_colors, hex_to_rgba),
-      domain = range(vals_sub, na.rm = TRUE)
+      js_palette = NULL,
+      domain = domain
     )
   } else if (fill_resolved$type == "colors") {
     cols_sub <- fill_resolved$values[prepared$not_na]
@@ -144,4 +155,27 @@ attach_fill <- function(df, fill_resolved, prepared, palette) {
 hex_to_rgba <- function(hex) {
   rgb <- grDevices::col2rgb(hex, alpha = TRUE)
   as.integer(rgb[, 1])
+}
+
+#' Map numeric values to RGBA through a palette (vectorised)
+#'
+#' Returns a list with integer vectors r, g, b, a (each length n).
+#' @noRd
+values_to_rgba <- function(values, domain, palette) {
+  pal_hex <- resolve_palette(palette, 256L)
+  rng <- domain[2] - domain[1]
+  if (rng == 0) {
+    t <- rep(0.5, length(values))
+  } else {
+    t <- pmin(1, pmax(0, (values - domain[1]) / rng))
+  }
+  # Map to palette index
+  idx <- pmin(length(pal_hex), pmax(1L, as.integer(t * (length(pal_hex) - 1)) + 1L))
+  rgba <- grDevices::col2rgb(pal_hex[idx], alpha = TRUE)
+  list(
+    r = as.integer(rgba[1L, ]),
+    g = as.integer(rgba[2L, ]),
+    b = as.integer(rgba[3L, ]),
+    a = as.integer(rgba[4L, ])
+  )
 }

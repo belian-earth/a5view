@@ -127,7 +127,10 @@ test_that("attach_fill handles numeric fill", {
   expect_true(result$fill_is_column)
   expect_equal(result$df[["_fill_value"]], c(1, 2, 3))
   expect_equal(result$domain, c(1, 3))
-  expect_length(result$js_palette, 8)
+  # Palette mapping done R-side; js_palette is NULL
+  expect_null(result$js_palette)
+  # RGBA columns should be present
+  expect_true("_fill_r" %in% names(result$df))
 })
 
 test_that("attach_fill handles column fill", {

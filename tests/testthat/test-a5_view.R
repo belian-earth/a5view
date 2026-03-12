@@ -122,18 +122,21 @@ test_that("a5_view errors on mismatched fill length", {
 
 # --- Palette ---
 
-test_that("a5_view uses custom colour palette", {
+test_that("a5_view with custom colour palette pre-computes RGBA", {
   cells <- make_cells(5)
   vals <- as.numeric(1:5)
   w <- a5_view(cells, fill = vals, palette = c("#000000", "#ffffff"))
-  expect_length(w$x$palette, 2)
+  # Palette mapping is done R-side; JS receives pre-computed RGBA
+  expect_null(w$x$palette)
+  expect_true(w$x$fill_per_cell)
 })
 
-test_that("a5_view uses named palette", {
+test_that("a5_view with named palette pre-computes RGBA", {
   cells <- make_cells(5)
   vals <- as.numeric(1:5)
   w <- a5_view(cells, fill = vals, palette = "Inferno")
-  expect_length(w$x$palette, 8)
+  expect_null(w$x$palette)
+  expect_true(w$x$fill_per_cell)
 })
 
 # --- Border ---
@@ -215,12 +218,15 @@ test_that("a5_view sets sizing policy with zero padding", {
 
 # --- Data payload ---
 
-test_that("a5_view payload uses columnar data", {
+test_that("a5_view payload has inline base64 Arrow IPC", {
   cells <- make_cells(3)
   w <- a5_view(cells)
-  expect_true(is.list(w$x$columns))
-  expect_true("pentagon" %in% names(w$x$columns))
-  expect_length(w$x$columns$pentagon, 3)
+  # Arrow IPC base64 string present
+  expect_true(is.character(w$x$arrow_ipc))
+  expect_true(nchar(w$x$arrow_ipc) > 0)
+  # Arrow JS dependency attached
+  dep_names <- vapply(w$dependencies, function(d) d$name, character(1))
+  expect_true("apache-arrow-js" %in% dep_names)
 })
 
 # --- Shiny bindings ---

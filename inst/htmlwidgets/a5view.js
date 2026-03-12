@@ -50,21 +50,6 @@ HTMLWidgets.widget({
         '<path d="M8 1.5A6.5 6.5 0 0 0 8 14.5Z" fill="currentColor" opacity="0.5"/>' +
       '</svg>';
 
-    function colorScale(value, domain, palette) {
-      if (domain[0] === domain[1]) return palette[0];
-      var t = Math.max(0, Math.min(1,
-        (value - domain[0]) / (domain[1] - domain[0])
-      ));
-      var i = Math.min(
-        Math.floor(t * (palette.length - 1)),
-        palette.length - 2
-      );
-      var f = t * (palette.length - 1) - i;
-      return palette[i].map(function(c, j) {
-        return Math.round(c + (palette[i + 1][j] - c) * f);
-      });
-    }
-
     function makeTileLayer(basemapKey) {
       if (!basemapKey || basemapKey === "none") return null;
       var info = BASEMAP_TILES[basemapKey];
@@ -336,27 +321,82 @@ HTMLWidgets.widget({
     var hoveredPentagon = null;
     var clickedPentagon = null;
 
-    function buildA5Layer(x) {
-      var getFillColor;
-      if (x.fill_is_column) {
-        var domain = x.domain;
-        var palette = x.palette;
-        getFillColor = function(d) {
-          return colorScale(d._fill_value, domain, palette);
-        };
-      } else if (x.fill_per_cell) {
-        getFillColor = function(d) {
-          return d._fill_rgba;
-        };
+    // Convert pentagon ID (BigInt or string) to hex string for Shiny/display
+    function pentToHex(p) {
+      if (p == null) return null;
+      if (typeof p === "bigint") return p.toString(16).padStart(16, "0");
+      return String(p);
+    }
+
+    // Build fill color Uint8ClampedArray for deck.gl binary attribute.
+    // RGBA is pre-computed on R side and arrives in Arrow columns.
+    function buildFillColorArray(x) {
+      var cols = x.data;
+      var n = cols.length;
+      var arr = new Uint8ClampedArray(n * 4);
+
+      if (x.fill_per_cell && cols.fillR) {
+        // RGBA pre-computed R-side — interleave into [r,g,b,a, r,g,b,a, ...]
+        var rData = cols.fillR.data && cols.fillR.data[0] && cols.fillR.data[0].values;
+        if (rData) {
+          // Fast path: direct typed array access from Arrow chunks
+          var gData = cols.fillG.data[0].values;
+          var bData = cols.fillB.data[0].values;
+          var aData = cols.fillA.data[0].values;
+          for (var i = 0; i < n; i++) {
+            var off = i * 4;
+            arr[off] = rData[i];
+            arr[off + 1] = gData[i];
+            arr[off + 2] = bData[i];
+            arr[off + 3] = aData[i];
+          }
+        } else {
+          // Fallback: use .get() accessor
+          for (var i = 0; i < n; i++) {
+            var off = i * 4;
+            arr[off] = cols.fillR.get(i);
+            arr[off + 1] = cols.fillG.get(i);
+            arr[off + 2] = cols.fillB.get(i);
+            arr[off + 3] = cols.fillA.get(i);
+          }
+        }
       } else {
-        getFillColor = x.fill_color;
+        // Uniform color
+        var c = x.fill_color || [116, 172, 144, 255];
+        for (var i = 0; i < n; i++) {
+          var off = i * 4;
+          arr[off] = c[0];
+          arr[off + 1] = c[1];
+          arr[off + 2] = c[2];
+          arr[off + 3] = c[3] !== undefined ? c[3] : 255;
+        }
       }
+      return arr;
+    }
+
+    // Build minimal row array for A5Layer (needs array data for picking)
+    function buildPickingArray(cols) {
+      var n = cols.length;
+      var rows = new Array(n);
+      for (var i = 0; i < n; i++) {
+        rows[i] = { pentagon: cols.pentagons.get(i) };
+      }
+      return rows;
+    }
+
+    function buildA5Layer(x) {
+      var cols = x.data;
+      var fillColorArray = buildFillColorArray(x);
+      var pickingData = buildPickingArray(cols);
 
       var layerProps = {
         id: "a5-layer",
-        data: x.data,
+        data: pickingData,
         getPentagon: function(d) { return d.pentagon; },
-        getFillColor: getFillColor,
+        getFillColor: function(d, info) {
+          var off = info.index * 4;
+          return [fillColorArray[off], fillColorArray[off + 1], fillColorArray[off + 2], fillColorArray[off + 3]];
+        },
         opacity: currentOpacity,
         extruded: x.extruded,
         elevationScale: x.elevation_scale,
@@ -369,9 +409,8 @@ HTMLWidgets.widget({
             if (deckgl && lastPayload) {
               deckgl.setProps({ layers: buildLayers(lastPayload) });
             }
-            // Send hover event to Shiny
             if (typeof Shiny !== "undefined" && Shiny.setInputValue) {
-              Shiny.setInputValue(el.id + "_hover", newHover, {priority: "event"});
+              Shiny.setInputValue(el.id + "_hover", pentToHex(newHover), {priority: "event"});
             }
           }
         },
@@ -382,9 +421,8 @@ HTMLWidgets.widget({
             if (deckgl && lastPayload) {
               deckgl.setProps({ layers: buildLayers(lastPayload) });
             }
-            // Send click event to Shiny
             if (typeof Shiny !== "undefined" && Shiny.setInputValue) {
-              Shiny.setInputValue(el.id + "_click", clickedPentagon, {priority: "event"});
+              Shiny.setInputValue(el.id + "_click", pentToHex(clickedPentagon), {priority: "event"});
             }
           }
         },
@@ -393,13 +431,13 @@ HTMLWidgets.widget({
         getLineWidth: x.line_width || 1,
         lineWidthUnits: "pixels",
         updateTriggers: {
-          getFillColor: [x.fill_is_column, x.fill_color, x.fill_per_cell, x.data.length]
+          getFillColor: [x.fill_is_column, x.fill_color, x.fill_per_cell, pickingData.length]
         }
       };
 
-      if (x.extruded) {
-        layerProps.getElevation = function(d) {
-          return d._elevation || 0;
+      if (x.extruded && cols.elevation) {
+        layerProps.getElevation = function(d, info) {
+          return (cols.elevation && info.index >= 0) ? (cols.elevation.get(info.index) || 0) : 0;
         };
       }
 
@@ -439,23 +477,71 @@ HTMLWidgets.widget({
       return layers;
     }
 
-    return {
+    // Synchronous Arrow IPC base64 decode (used for initial standalone render)
+    function decodeArrowData(b64) {
+      var binary = atob(b64);
+      var bytes = new Uint8Array(binary.length);
+      for (var i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      var table = Arrow.tableFromIPC(bytes.buffer);
+      return arrowTableToColumnar(table);
+    }
+
+    function arrowTableToColumnar(table) {
+      return {
+        length: table.numRows,
+        pentagons: table.getChild("pentagon"),
+        fillValues: table.getChild("_fill_value"),
+        fillR: table.getChild("_fill_r"),
+        fillG: table.getChild("_fill_g"),
+        fillB: table.getChild("_fill_b"),
+        fillA: table.getChild("_fill_a"),
+        elevation: table.getChild("_elevation")
+      };
+    }
+
+    var widgetObj = {
       renderValue: function(x) {
-        // Convert columnar data to row objects
-        if (x.columns && !x.data) {
-          var keys = Object.keys(x.columns);
-          var n = x.columns[keys[0]].length;
-          var rows = new Array(n);
-          for (var i = 0; i < n; i++) {
-            var row = {};
-            for (var k = 0; k < keys.length; k++) {
-              row[keys[k]] = x.columns[keys[k]][i];
-            }
-            rows[i] = row;
-          }
-          x.data = rows;
+        if (x.arrow_ipc && typeof Arrow !== "undefined") {
+          x.data = decodeArrowData(x.arrow_ipc);
+        }
+        renderDeck(x);
+      },
+
+      resize: function(width, height) {}
+    };
+
+    // Shiny proxy: update data in-place without full widget re-render
+    if (typeof Shiny !== "undefined") {
+      Shiny.addCustomMessageHandler("a5view-update-" + el.id, function(msg) {
+        if (!lastPayload || !deckgl) return;
+
+        // Clear stale highlight — data has changed
+        clickedPentagon = null;
+        hoveredPentagon = null;
+
+        // Update metadata
+        if (msg.fill_is_column !== undefined) lastPayload.fill_is_column = msg.fill_is_column;
+        if (msg.fill_color !== undefined) lastPayload.fill_color = msg.fill_color;
+        if (msg.fill_per_cell !== undefined) lastPayload.fill_per_cell = msg.fill_per_cell;
+        if (msg.palette !== undefined) lastPayload.palette = msg.palette;
+        if (msg.domain !== undefined) lastPayload.domain = msg.domain;
+        if (msg.has_fill_value !== undefined) lastPayload.has_fill_value = msg.has_fill_value;
+        if (msg.tooltip !== undefined) {
+          lastPayload.tooltip = msg.tooltip;
+          lastPayload.pickable = true;
         }
 
+        if (msg.arrow_ipc && typeof Arrow !== "undefined") {
+          lastPayload.data = decodeArrowData(msg.arrow_ipc);
+        }
+
+        deckgl.setProps({ layers: buildLayers(lastPayload) });
+      });
+    }
+
+    function renderDeck(x) {
         lastPayload = x;
         currentOpacity = x.opacity;
 
@@ -469,32 +555,30 @@ HTMLWidgets.widget({
           el.style.position = "relative";
         }
 
-        var hasFillValue = x.has_fill_value;
+        var tooltipFn = function(info) {
+              if (!info || !info.object || !lastPayload || !lastPayload.tooltip) return null;
+              var id = info.object.pentagon;
 
-        var tooltipFn = x.tooltip
-          ? function(info) {
-              if (!info || !info.object) return null;
-              var obj = info.object;
-              var id = obj.pentagon;
-
-              // Clicked cell: always show cell ID
+              var idStr = (typeof id === "bigint")
+                ? id.toString(16).padStart(16, "0")
+                : String(id);
               if (clickedPentagon === id) {
-                return { text: id };
+                return { text: idStr };
               }
 
-              // Hover: show fill value if present, otherwise cell ID
-              if (hasFillValue && obj._fill_value != null) {
-                var val = obj._fill_value;
-                // Format to reasonable precision
-                var display = (typeof val === "number")
-                  ? (Number.isInteger(val) ? val.toString() : val.toPrecision(4))
-                  : String(val);
-                return { text: display };
+              var cols = lastPayload.data;
+              if (lastPayload.has_fill_value && cols && cols.fillValues && info.index >= 0) {
+                var val = cols.fillValues.get(info.index);
+                if (val != null) {
+                  var display = (typeof val === "number")
+                    ? (Number.isInteger(val) ? val.toString() : val.toPrecision(4))
+                    : String(val);
+                  return { text: display };
+                }
               }
 
-              return { text: id };
-            }
-          : null;
+              return { text: idStr };
+            };
 
         var layers = buildLayers(x);
 
@@ -502,7 +586,6 @@ HTMLWidgets.widget({
         var wantGlobe = !!(x.globe && deck._GlobeView);
         if (deckgl && wantGlobe !== currentGlobe) {
           deckgl.finalize();
-          // Remove leftover canvas/children created by deck.gl
           while (el.lastChild) el.removeChild(el.lastChild);
           deckgl = null;
         }
@@ -520,7 +603,6 @@ HTMLWidgets.widget({
               currentViewState = e.viewState;
             },
             onHover: function(info) {
-              // Send cursor lat/lon to Shiny (fires over any part of the map)
               if (typeof Shiny !== "undefined" && Shiny.setInputValue && info && info.coordinate) {
                 Shiny.setInputValue(el.id + "_cursor", {
                   lng: info.coordinate[0],
@@ -529,14 +611,12 @@ HTMLWidgets.widget({
               }
             },
             onClick: function(info) {
-              // Send click lat/lon to Shiny
               if (typeof Shiny !== "undefined" && Shiny.setInputValue && info && info.coordinate) {
                 Shiny.setInputValue(el.id + "_click_coord", {
                   lng: info.coordinate[0],
                   lat: info.coordinate[1]
                 }, {priority: "event"});
               }
-              // Click empty space → clear clicked state
               if (!info || !info.object) {
                 if (clickedPentagon) {
                   clickedPentagon = null;
@@ -557,9 +637,8 @@ HTMLWidgets.widget({
         }
 
         buildControls(basemaps, el);
-      },
+    }
 
-      resize: function(width, height) {}
-    };
+    return widgetObj;
   }
 });
