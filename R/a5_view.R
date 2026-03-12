@@ -31,6 +31,8 @@
 #' @param width,height Widget dimensions. Default: `NULL` (fills container).
 #' @param lng,lat,zoom Initial map view. If `NULL` (default),
 #'   auto-centres on the cell centroids.
+#' @param globe Logical. Use a 3D globe projection instead of the
+#'   default Mercator map. Default: `FALSE`.
 #' @param basemap Character vector of basemap styles to make available.
 #'   Options are `"dark"`, `"light"`, `"osm"`, and `"satellite"`. The
 #'   first element is shown initially. When multiple basemaps are given,
@@ -43,7 +45,7 @@ a5_view <- function(
   cells,
   fill = "#74ac90ff",
   palette = "Viridis",
-  opacity = 0.6,
+  opacity = 0.3,
   tooltip = TRUE,
   elevation = NULL,
   elevation_scale = 1,
@@ -54,6 +56,7 @@ a5_view <- function(
   lng = NULL,
   lat = NULL,
   zoom = NULL,
+  globe = FALSE,
   basemap = c("dark", "light", "osm", "satellite")
 ) {
   # --- Validate all arguments ---
@@ -67,6 +70,9 @@ a5_view <- function(
   check_optional_dimension(width, "width")
   check_optional_dimension(height, "height")
   check_border(border)
+  if (!rlang::is_bool(globe)) {
+    cli::cli_abort("{.arg globe} must be {.val TRUE} or {.val FALSE}.")
+  }
   check_basemap(basemap)
   check_tooltip(tooltip)
   check_palette(palette)
@@ -144,6 +150,7 @@ a5_view <- function(
     line_color = if (!is.null(border)) hex_to_rgba(border) else NULL,
     line_width = border_width,
     view_state = view_state,
+    globe = globe,
     basemaps = as.list(basemap)
   )
 

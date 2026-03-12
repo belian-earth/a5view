@@ -1,6 +1,7 @@
 library(shiny)
 library(a5R)
-library(a5view)
+devtools::load_all()
+# library(a5view)
 
 resolution <- 8
 
@@ -75,6 +76,9 @@ ui <- fluidPage(
       type = "checkbox",
       checked = "checked"
     ),
+    tags$span(class = "divider"),
+    tags$label(`for` = "globe_cb", "Globe"),
+    tags$input(id = "globe_cb", type = "checkbox"),
     tags$script(HTML(
       "
       document.getElementById('radius_slider').addEventListener('input', function() {
@@ -85,9 +89,13 @@ ui <- fluidPage(
       document.getElementById('uncompact_cb').addEventListener('change', function() {
         Shiny.setInputValue('uncompact', this.checked);
       });
+      document.getElementById('globe_cb').addEventListener('change', function() {
+        Shiny.setInputValue('globe', this.checked);
+      });
       $(document).on('shiny:connected', function() {
         Shiny.setInputValue('radius_km', 50);
         Shiny.setInputValue('uncompact', true);
+        Shiny.setInputValue('globe', false);
       });
     "
     ))
@@ -156,6 +164,7 @@ server <- function(input, output, session) {
       cells = cap$cells,
       tooltip = pinned(),
       border = NULL,
+      globe = isTRUE(input$globe),
       basemap = "dark",
       opacity = 0.9
     )

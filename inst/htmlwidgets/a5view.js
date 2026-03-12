@@ -6,6 +6,8 @@ HTMLWidgets.widget({
     var deckgl = null;
     var currentBasemap = null;
     var currentOpacity = 0.6;
+    var currentGlobe = false;
+    var currentViewState = null;
     var ACCENT = "#74ac90";
 
     var BASEMAP_TILES = {
@@ -401,6 +403,10 @@ HTMLWidgets.widget({
         };
       }
 
+      if (currentGlobe) {
+        layerProps.parameters = { depthTest: false };
+      }
+
       return new deck.A5Layer(layerProps);
     }
 
@@ -492,15 +498,27 @@ HTMLWidgets.widget({
 
         var layers = buildLayers(x);
 
+        // Recreate deck if globe mode changed
+        var wantGlobe = !!(x.globe && deck._GlobeView);
+        if (deckgl && wantGlobe !== currentGlobe) {
+          deckgl.finalize();
+          // Remove leftover canvas/children created by deck.gl
+          while (el.lastChild) el.removeChild(el.lastChild);
+          deckgl = null;
+        }
+
         if (deckgl) {
           deckgl.setProps({ layers: layers, getTooltip: tooltipFn });
         } else {
-          deckgl = new deck.DeckGL({
+          var deckProps = {
             container: el,
-            initialViewState: x.view_state,
+            initialViewState: currentViewState || x.view_state,
             controller: true,
             layers: layers,
             getTooltip: tooltipFn,
+            onViewStateChange: function(e) {
+              currentViewState = e.viewState;
+            },
             onHover: function(info) {
               // Send cursor lat/lon to Shiny (fires over any part of the map)
               if (typeof Shiny !== "undefined" && Shiny.setInputValue && info && info.coordinate) {
@@ -528,7 +546,14 @@ HTMLWidgets.widget({
                 }
               }
             }
-          });
+          };
+
+          if (wantGlobe) {
+            deckProps.views = new deck._GlobeView({ resolution: 10 });
+          }
+
+          currentGlobe = wantGlobe;
+          deckgl = new deck.DeckGL(deckProps);
         }
 
         buildControls(basemaps, el);
