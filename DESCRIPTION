@@ -1,6 +1,6 @@
 Package: a5view
 Title: Interactive Map Viewer for A5 Geospatial Cells
-Version: 0.0.1
+Version: 0.1.0
 Authors@R: c(
     person("Hugh", "Graham", role = c("aut", "cre"),
            email = "hugh@belian.earth"),
