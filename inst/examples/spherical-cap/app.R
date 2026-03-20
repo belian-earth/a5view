@@ -3,13 +3,15 @@ library(a5R)
 devtools::load_all()
 # library(a5view)
 
+a5_set_threads(6)
+
 resolution <- 8
 
 # Initial centre: Edinburgh
 centre <- a5_lonlat_to_cell(-3.19, 55.95, resolution = resolution)
 
-#' Compute spherical cap cells with distances
-compute_cap <- function(cell, radius_km, uncompact = TRUE) {
+#' Compute spherical cap cells with optional distances
+compute_cap <- function(cell, radius_km, uncompact = TRUE, dist = TRUE) {
   cap_cells <- a5_spherical_cap(cell, radius_km * 1000)
   if (uncompact) {
     cap_cells <- a5_uncompact(cap_cells, resolution = resolution)
@@ -17,7 +19,10 @@ compute_cap <- function(cell, radius_km, uncompact = TRUE) {
   if (length(cap_cells) == 0) {
     return(NULL)
   }
-  dist_km <- as.numeric(a5_cell_distance(cell, cap_cells, units = "km"))
+  if (!dist) {
+    return(list(cells = cap_cells, dist = NULL))
+  }
+  dist_km <- a5_cell_distance(cell, cap_cells, units = NULL) / 1000
   # Fall back to NULL fill when colour mapping isn't possible
   if (length(dist_km) < 2 || diff(range(dist_km)) == 0) {
     return(list(cells = cap_cells, dist = NULL))
@@ -77,6 +82,9 @@ ui <- fluidPage(
       checked = "checked"
     ),
     tags$span(class = "divider"),
+    tags$label(`for` = "dist_fill_cb", "Distance fill"),
+    tags$input(id = "dist_fill_cb", type = "checkbox", checked = "checked"),
+    tags$span(class = "divider"),
     tags$label(`for` = "globe_cb", "Globe"),
     tags$input(id = "globe_cb", type = "checkbox"),
     tags$script(HTML(
@@ -89,12 +97,16 @@ ui <- fluidPage(
       document.getElementById('uncompact_cb').addEventListener('change', function() {
         Shiny.setInputValue('uncompact', this.checked);
       });
+      document.getElementById('dist_fill_cb').addEventListener('change', function() {
+        Shiny.setInputValue('dist_fill', this.checked);
+      });
       document.getElementById('globe_cb').addEventListener('change', function() {
         Shiny.setInputValue('globe', this.checked);
       });
       $(document).on('shiny:connected', function() {
         Shiny.setInputValue('radius_km', 50);
         Shiny.setInputValue('uncompact', true);
+        Shiny.setInputValue('dist_fill', true);
         Shiny.setInputValue('globe', false);
       });
     "
@@ -111,8 +123,7 @@ server <- function(input, output, session) {
   # Whether the cap is pinned (clicked) or following the cursor
   pinned <- reactiveVal(FALSE)
 
-  # Debounce cursor lat/lon so we only recompute after it settles
-  cursor <- reactive(input$map_cursor) |> debounce(10)
+  cursor <- reactive(input$map_cursor) |> debounce(3)
 
   # Hover updates centre only when not pinned
   observeEvent(cursor(), {
@@ -145,34 +156,58 @@ server <- function(input, output, session) {
     }
   })
 
-  cap_data <- reactive({
-    radius <- input$radius_km
-    if (is.null(radius)) {
-      radius <- 50
-    }
-    uc <- isTRUE(input$uncompact)
-    compute_cap(current_centre(), radius, uncompact = uc)
-  })
-
+  # Full render — only runs on init and when globe mode changes
   output$map <- renderA5_view({
-    cap <- cap_data()
+    globe <- isTRUE(input$globe)
+    cap <- compute_cap(centre, 50)
     if (is.null(cap)) {
       return(NULL)
     }
-
     args <- list(
       cells = cap$cells,
-      tooltip = pinned(),
       border = NULL,
-      globe = isTRUE(input$globe),
-      basemap = "dark",
-      opacity = 0.9
+      globe = globe,
+      # basemap = "dark",
+      opacity = 0.9,
+      tooltip = FALSE
     )
     if (!is.null(cap$dist)) {
       args$fill <- cap$dist
       args$palette <- "Inferno"
     }
     do.call(a5_view, args)
+  })
+
+  # Proxy updates: push new data without widget rebuild
+  cap_data <- reactive({
+    radius <- input$radius_km
+    if (is.null(radius)) {
+      radius <- 50
+    }
+    uc <- isTRUE(input$uncompact)
+    use_dist <- isTRUE(input$dist_fill)
+    compute_cap(current_centre(), radius, uncompact = uc, dist = use_dist)
+  })
+
+  observe({
+    cap <- cap_data()
+    if (is.null(cap)) {
+      return()
+    }
+
+    use_dist <- isTRUE(input$dist_fill)
+    if (use_dist && !is.null(cap$dist)) {
+      a5_view_update(
+        session,
+        "map",
+        cap$cells,
+        fill = cap$dist,
+        palette = "Inferno",
+        tooltip = pinned()
+      )
+    } else {
+      a5_view_update(session, "map", cap$cells, tooltip = pinned())
+    }
   })
 }
 

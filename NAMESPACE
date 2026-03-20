@@ -2,4 +2,5 @@
 
 export(a5_view)
 export(a5_viewOutput)
+export(a5_view_update)
 export(renderA5_view)

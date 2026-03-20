@@ -133,10 +133,12 @@ test_that("fill_identity works with packed RGB integers", {
   w <- a5_view(cells, fill = rgb_packed, fill_identity = TRUE)
   expect_true(w$x$fill_per_cell)
   expect_false(w$x$fill_is_column)
-  rgba <- w$x$columns[["_fill_rgba"]]
-  expect_equal(rgba[[1]], c(255L, 0L, 0L, 255L))
-  expect_equal(rgba[[2]], c(0L, 255L, 0L, 255L))
-  expect_equal(rgba[[3]], c(0L, 0L, 255L, 255L))
+  # Verify RGBA encoded in Arrow IPC
+  tbl <- arrow::read_ipc_stream(base64enc::base64decode(w$x$arrow_ipc))
+  expect_equal(as.integer(tbl[["_fill_r"]]), c(255L, 0L, 0L))
+  expect_equal(as.integer(tbl[["_fill_g"]]), c(0L, 255L, 0L))
+  expect_equal(as.integer(tbl[["_fill_b"]]), c(0L, 0L, 255L))
+  expect_equal(as.integer(tbl[["_fill_a"]]), c(255L, 255L, 255L))
 })
 
 test_that("fill_identity works with hex colour strings", {
@@ -144,9 +146,9 @@ test_that("fill_identity works with hex colour strings", {
   hex_cols <- c("#ff0000", "#00ff00", "#0000ff")
   w <- a5_view(cells, fill = hex_cols, fill_identity = TRUE)
   expect_true(w$x$fill_per_cell)
-  rgba <- w$x$columns[["_fill_rgba"]]
-  expect_equal(rgba[[1]], c(255L, 0L, 0L, 255L))
-  expect_equal(rgba[[2]], c(0L, 255L, 0L, 255L))
+  tbl <- arrow::read_ipc_stream(base64enc::base64decode(w$x$arrow_ipc))
+  expect_equal(as.integer(tbl[["_fill_r"]]), c(255L, 0L, 0L))
+  expect_equal(as.integer(tbl[["_fill_g"]]), c(0L, 255L, 0L))
 })
 
 test_that("fill_identity works with column name", {
@@ -155,8 +157,8 @@ test_that("fill_identity works with column name", {
   df <- data.frame(cell = cells, rgb = rgb_packed)
   w <- a5_view(df, fill = rgb, fill_identity = TRUE)
   expect_true(w$x$fill_per_cell)
-  rgba <- w$x$columns[["_fill_rgba"]]
-  expect_equal(rgba[[1]], c(255L, 0L, 0L, 255L))
+  tbl <- arrow::read_ipc_stream(base64enc::base64decode(w$x$arrow_ipc))
+  expect_equal(as.integer(tbl[["_fill_r"]]), c(255L, 0L, 0L))
 })
 
 test_that("fill_identity errors on uniform fill", {
@@ -166,18 +168,21 @@ test_that("fill_identity errors on uniform fill", {
 
 # --- Palette ---
 
-test_that("a5_view uses custom colour palette", {
+test_that("a5_view with custom colour palette pre-computes RGBA", {
   cells <- make_cells(5)
   vals <- as.numeric(1:5)
   w <- a5_view(cells, fill = vals, palette = c("#000000", "#ffffff"))
-  expect_length(w$x$palette, 2)
+  # Palette mapping is done R-side; JS receives pre-computed RGBA
+  expect_null(w$x$palette)
+  expect_true(w$x$fill_per_cell)
 })
 
-test_that("a5_view uses named palette", {
+test_that("a5_view with named palette pre-computes RGBA", {
   cells <- make_cells(5)
   vals <- as.numeric(1:5)
   w <- a5_view(cells, fill = vals, palette = "Inferno")
-  expect_length(w$x$palette, 8)
+  expect_null(w$x$palette)
+  expect_true(w$x$fill_per_cell)
 })
 
 # --- Border ---
@@ -259,12 +264,15 @@ test_that("a5_view sets sizing policy with zero padding", {
 
 # --- Data payload ---
 
-test_that("a5_view payload uses columnar data", {
+test_that("a5_view payload has inline base64 Arrow IPC", {
   cells <- make_cells(3)
   w <- a5_view(cells)
-  expect_true(is.list(w$x$columns))
-  expect_true("pentagon" %in% names(w$x$columns))
-  expect_length(w$x$columns$pentagon, 3)
+  # Arrow IPC base64 string present
+  expect_true(is.character(w$x$arrow_ipc))
+  expect_true(nchar(w$x$arrow_ipc) > 0)
+  # Arrow JS dependency attached
+  dep_names <- vapply(w$dependencies, function(d) d$name, character(1))
+  expect_true("apache-arrow-js" %in% dep_names)
 })
 
 # --- Shiny bindings ---
