@@ -120,6 +120,50 @@ test_that("a5_view errors on mismatched fill length", {
   expect_error(a5_view(cells, fill = 1:3), "length 3")
 })
 
+# --- Fill identity ---
+
+test_that("fill_identity works with packed RGB integers", {
+  cells <- make_cells(3)
+  # Red, green, blue as packed uint32: (R << 16) | (G << 8) | B
+  rgb_packed <- c(
+    bitwOr(bitwShiftL(255L, 16L), bitwOr(bitwShiftL(0L, 8L), 0L)),   # red
+    bitwOr(bitwShiftL(0L, 16L), bitwOr(bitwShiftL(255L, 8L), 0L)),   # green
+    bitwOr(bitwShiftL(0L, 16L), bitwOr(bitwShiftL(0L, 8L), 255L))    # blue
+  )
+  w <- a5_view(cells, fill = rgb_packed, fill_identity = TRUE)
+  expect_true(w$x$fill_per_cell)
+  expect_false(w$x$fill_is_column)
+  rgba <- w$x$columns[["_fill_rgba"]]
+  expect_equal(rgba[[1]], c(255L, 0L, 0L, 255L))
+  expect_equal(rgba[[2]], c(0L, 255L, 0L, 255L))
+  expect_equal(rgba[[3]], c(0L, 0L, 255L, 255L))
+})
+
+test_that("fill_identity works with hex colour strings", {
+  cells <- make_cells(3)
+  hex_cols <- c("#ff0000", "#00ff00", "#0000ff")
+  w <- a5_view(cells, fill = hex_cols, fill_identity = TRUE)
+  expect_true(w$x$fill_per_cell)
+  rgba <- w$x$columns[["_fill_rgba"]]
+  expect_equal(rgba[[1]], c(255L, 0L, 0L, 255L))
+  expect_equal(rgba[[2]], c(0L, 255L, 0L, 255L))
+})
+
+test_that("fill_identity works with column name", {
+  cells <- make_cells(3)
+  rgb_packed <- c(16711680L, 65280L, 255L)  # red, green, blue
+  df <- data.frame(cell = cells, rgb = rgb_packed)
+  w <- a5_view(df, fill = rgb, fill_identity = TRUE)
+  expect_true(w$x$fill_per_cell)
+  rgba <- w$x$columns[["_fill_rgba"]]
+  expect_equal(rgba[[1]], c(255L, 0L, 0L, 255L))
+})
+
+test_that("fill_identity errors on uniform fill", {
+  cells <- make_cells(3)
+  expect_error(a5_view(cells, fill = "#ff0000", fill_identity = TRUE), "fill_identity")
+})
+
 # --- Palette ---
 
 test_that("a5_view uses custom colour palette", {

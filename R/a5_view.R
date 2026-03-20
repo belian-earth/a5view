@@ -12,6 +12,10 @@
 #'     per-cell colours.
 #'   - An unquoted column name when `cells` is a data frame.
 #'   Default: `"#3388ff"`.
+#' @param fill_identity Logical. When `TRUE`, treat `fill` values as
+#'   literal colours rather than mapping through `palette`. Accepts
+#'   packed RGB integers (`(R << 16) | (G << 8) | B`) or hex colour
+#'   strings. Default: `FALSE`.
 #' @param palette Colour palette used when `fill` is numeric. Either a
 #'   palette name accepted by [grDevices::hcl.colors()] (e.g.
 #'   `"viridis"`, `"inferno"`, `"plasma"`, `"turbo"`, `"rocket"`) or
@@ -44,6 +48,7 @@
 a5_view <- function(
   cells,
   fill = "#74ac90ff",
+  fill_identity = FALSE,
   palette = "Viridis",
   opacity = 0.3,
   tooltip = TRUE,
@@ -76,6 +81,9 @@ a5_view <- function(
   check_basemap(basemap)
   check_tooltip(tooltip)
   check_palette(palette)
+  if (!rlang::is_bool(fill_identity)) {
+    cli::cli_abort("{.arg fill_identity} must be {.val TRUE} or {.val FALSE}.")
+  }
 
   # --- Resolve fill and elevation (NSE) ---
   fill_expr <- substitute(fill)
@@ -83,6 +91,21 @@ a5_view <- function(
 
   n_cells <- if (a5R::is_a5_cell(cells)) length(cells) else nrow(cells)
   fill_resolved <- resolve_fill(cells, fill, fill_expr, n_cells)
+
+  # --- Identity fill: convert column/numeric values to literal colours ---
+  if (fill_identity) {
+    if (fill_resolved$type == "column") {
+      fill_resolved$identity <- TRUE
+    } else if (fill_resolved$type == "numeric") {
+      fill_resolved$type <- "identity"
+    } else if (fill_resolved$type == "colors") {
+      # Already hex colour strings — identity is a no-op, pass through
+    } else {
+      cli::cli_abort(
+        "{.code fill_identity = TRUE} requires {.arg fill} to be a numeric vector, hex colour vector, or column name."
+      )
+    }
+  }
 
   elev_col <- resolve_elevation_col(cells, elev_expr)
 
