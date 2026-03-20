@@ -1,6 +1,6 @@
 Package: a5view
 Title: Interactive Map Viewer for A5 Geospatial Cells
-Version: 0.0.1
+Version: 0.1.0
 Authors@R: c(
     person("Hugh", "Graham", role = c("aut", "cre"),
            email = "hugh@belian.earth"),
@@ -16,7 +16,10 @@ Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.3
 Imports:
     a5R,
+    arrow,
+    base64enc,
     cli,
+    geoarrowWidget,
     grDevices,
     htmlwidgets,
     rlang (>= 1.0.0)
@@ -24,5 +27,6 @@ Suggests:
     testthat (>= 3.0.0),
     webshot2
 Remotes:
-    belian-earth/a5R
+    belian-earth/a5R,
+    r-spatial/geoarrowWidget
 Config/testthat/edition: 3

@@ -12,6 +12,10 @@
 #'     per-cell colours.
 #'   - An unquoted column name when `cells` is a data frame.
 #'   Default: `"#3388ff"`.
+#' @param fill_identity Logical. When `TRUE`, treat `fill` values as
+#'   literal colours rather than mapping through `palette`. Accepts
+#'   packed RGB integers (`(R << 16) | (G << 8) | B`) or hex colour
+#'   strings. Default: `FALSE`.
 #' @param palette Colour palette used when `fill` is numeric. Either a
 #'   palette name accepted by [grDevices::hcl.colors()] (e.g.
 #'   `"viridis"`, `"inferno"`, `"plasma"`, `"turbo"`, `"rocket"`) or
@@ -44,6 +48,7 @@
 a5_view <- function(
   cells,
   fill = "#74ac90ff",
+  fill_identity = FALSE,
   palette = "Viridis",
   opacity = 0.3,
   tooltip = TRUE,
@@ -76,6 +81,9 @@ a5_view <- function(
   check_basemap(basemap)
   check_tooltip(tooltip)
   check_palette(palette)
+  if (!rlang::is_bool(fill_identity)) {
+    cli::cli_abort("{.arg fill_identity} must be {.val TRUE} or {.val FALSE}.")
+  }
 
   # --- Resolve fill and elevation (NSE) ---
   fill_expr <- substitute(fill)
@@ -83,6 +91,21 @@ a5_view <- function(
 
   n_cells <- if (a5R::is_a5_cell(cells)) length(cells) else nrow(cells)
   fill_resolved <- resolve_fill(cells, fill, fill_expr, n_cells)
+
+  # --- Identity fill: convert column/numeric values to literal colours ---
+  if (fill_identity) {
+    if (fill_resolved$type == "column") {
+      fill_resolved$identity <- TRUE
+    } else if (fill_resolved$type == "numeric") {
+      fill_resolved$type <- "identity"
+    } else if (fill_resolved$type == "colors") {
+      # Already hex colour strings — identity is a no-op, pass through
+    } else {
+      cli::cli_abort(
+        "{.code fill_identity = TRUE} requires {.arg fill} to be a numeric vector, hex colour vector, or column name."
+      )
+    }
+  }
 
   elev_col <- resolve_elevation_col(cells, elev_expr)
 
@@ -126,18 +149,39 @@ a5_view <- function(
   # --- Auto-center view ---
   view_state <- auto_view(df[["pentagon"]], lng, lat, zoom)
 
-  # --- Build JS payload (columnar for compact JSON) ---
-  columns <- lapply(df, function(col) {
-    if (is.list(col)) col else unname(col)
-  })
-
+  # --- Build Arrow IPC as base64 for inline transfer ---
+  arrow_cols <- list(pentagon = a5R::a5_cell_to_arrow(prepared$a5_cells))
+  if (has_fill_value) {
+    arrow_cols[["_fill_value"]] <- df[["_fill_value"]]
+  }
+  has_rgba_cols <- "_fill_r" %in% names(df)
   has_per_cell_rgba <- "_fill_rgba" %in% names(df)
+  if (has_rgba_cols) {
+    # Pre-computed RGBA as uint8 (0-255 fits in 1 byte, not 4)
+    arrow_cols[["_fill_r"]] <- arrow::Array$create(df[["_fill_r"]], type = arrow::uint8())
+    arrow_cols[["_fill_g"]] <- arrow::Array$create(df[["_fill_g"]], type = arrow::uint8())
+    arrow_cols[["_fill_b"]] <- arrow::Array$create(df[["_fill_b"]], type = arrow::uint8())
+    arrow_cols[["_fill_a"]] <- arrow::Array$create(df[["_fill_a"]], type = arrow::uint8())
+  } else if (has_per_cell_rgba) {
+    rgba_mat <- do.call(rbind, df[["_fill_rgba"]])
+    arrow_cols[["_fill_r"]] <- arrow::Array$create(as.integer(rgba_mat[, 1]), type = arrow::uint8())
+    arrow_cols[["_fill_g"]] <- arrow::Array$create(as.integer(rgba_mat[, 2]), type = arrow::uint8())
+    arrow_cols[["_fill_b"]] <- arrow::Array$create(as.integer(rgba_mat[, 3]), type = arrow::uint8())
+    arrow_cols[["_fill_a"]] <- arrow::Array$create(as.integer(rgba_mat[, 4]), type = arrow::uint8())
+  }
+  if (extruded) {
+    arrow_cols[["_elevation"]] <- df[["_elevation"]]
+  }
+  arrow_tbl <- do.call(arrow::arrow_table, arrow_cols)
+  ipc_raw <- arrow::write_to_raw(arrow_tbl, format = "stream")
+  arrow_b64 <- base64enc::base64encode(ipc_raw)
 
+  # --- JSON payload: base64 Arrow IPC + metadata ---
   payload <- list(
-    columns = columns,
+    arrow_ipc = arrow_b64,
     fill_is_column = fill_payload$fill_is_column,
     fill_color = fill_payload$fill_color,
-    fill_per_cell = has_per_cell_rgba,
+    fill_per_cell = has_rgba_cols || has_per_cell_rgba,
     palette = fill_payload$js_palette,
     domain = fill_payload$domain,
     opacity = opacity,
@@ -154,7 +198,7 @@ a5_view <- function(
     basemaps = as.list(basemap)
   )
 
-  htmlwidgets::createWidget(
+  widget <- htmlwidgets::createWidget(
     name = "a5view",
     x = payload,
     width = width,
@@ -167,6 +211,10 @@ a5_view <- function(
       browser.padding = 0
     )
   )
+
+  # Attach Arrow JS library for decoding
+  widget <- geoarrowWidget::attachArrowDependency(widget)
+  widget
 }
 
 #' Shiny output binding for a5_view
@@ -197,4 +245,78 @@ renderA5_view <- function(expr, env = parent.frame(), quoted = FALSE) {
     expr <- substitute(expr)
   }
   htmlwidgets::shinyRenderWidget(expr, a5_viewOutput, env, quoted = TRUE)
+}
+
+#' Update a5_view layer data without full re-render
+#'
+#' Sends new cell data to an existing a5_view widget via a Shiny custom
+#' message, avoiding the full widget teardown/rebuild cycle. Much faster
+#' for interactive updates.
+#'
+#' @param session The Shiny session object.
+#' @param outputId The output ID of the a5_view widget.
+#' @param cells An [a5R::a5_cell] vector or data frame.
+#' @param fill Fill specification (same as [a5_view()]).
+#' @param palette Palette (same as [a5_view()]).
+#' @param tooltip Logical, show tooltip.
+#' @export
+a5_view_update <- function(
+  session,
+  outputId,
+  cells,
+  fill = "#74ac90ff",
+  palette = "Viridis",
+  tooltip = TRUE
+) {
+  check_cells(cells)
+
+  fill_expr <- substitute(fill)
+  n_cells <- if (a5R::is_a5_cell(cells)) length(cells) else nrow(cells)
+  fill_resolved <- resolve_fill(cells, fill, fill_expr, n_cells)
+
+  prepared <- prepare_data(cells)
+  df <- prepared$data
+
+  if (nrow(df) == 0L) return(invisible(NULL))
+
+  fill_payload <- attach_fill(df, fill_resolved, prepared, palette)
+  df <- fill_payload$df
+  has_fill_value <- "_fill_value" %in% names(df)
+  has_rgba_cols <- "_fill_r" %in% names(df)
+  has_per_cell_rgba <- "_fill_rgba" %in% names(df)
+
+  # Build Arrow IPC
+  arrow_cols <- list(pentagon = a5R::a5_cell_to_arrow(prepared$a5_cells))
+  if (has_fill_value) {
+    arrow_cols[["_fill_value"]] <- df[["_fill_value"]]
+  }
+  if (has_rgba_cols) {
+    arrow_cols[["_fill_r"]] <- arrow::Array$create(df[["_fill_r"]], type = arrow::uint8())
+    arrow_cols[["_fill_g"]] <- arrow::Array$create(df[["_fill_g"]], type = arrow::uint8())
+    arrow_cols[["_fill_b"]] <- arrow::Array$create(df[["_fill_b"]], type = arrow::uint8())
+    arrow_cols[["_fill_a"]] <- arrow::Array$create(df[["_fill_a"]], type = arrow::uint8())
+  } else if (has_per_cell_rgba) {
+    rgba_mat <- do.call(rbind, df[["_fill_rgba"]])
+    arrow_cols[["_fill_r"]] <- arrow::Array$create(as.integer(rgba_mat[, 1]), type = arrow::uint8())
+    arrow_cols[["_fill_g"]] <- arrow::Array$create(as.integer(rgba_mat[, 2]), type = arrow::uint8())
+    arrow_cols[["_fill_b"]] <- arrow::Array$create(as.integer(rgba_mat[, 3]), type = arrow::uint8())
+    arrow_cols[["_fill_a"]] <- arrow::Array$create(as.integer(rgba_mat[, 4]), type = arrow::uint8())
+  }
+  arrow_tbl <- do.call(arrow::arrow_table, arrow_cols)
+  ipc_raw <- arrow::write_to_raw(arrow_tbl, format = "stream")
+  arrow_b64 <- base64enc::base64encode(ipc_raw)
+
+  msg <- list(
+    arrow_ipc = arrow_b64,
+    fill_is_column = fill_payload$fill_is_column,
+    fill_color = fill_payload$fill_color,
+    fill_per_cell = has_rgba_cols || has_per_cell_rgba,
+    palette = fill_payload$js_palette,
+    domain = fill_payload$domain,
+    has_fill_value = has_fill_value,
+    tooltip = !isFALSE(tooltip)
+  )
+
+  session$sendCustomMessage(paste0("a5view-update-", outputId), msg)
+  invisible(NULL)
 }

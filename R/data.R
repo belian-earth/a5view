@@ -13,14 +13,18 @@ find_cell_column <- function(df) {
 
 #' Prepare data payload for JS
 #' @return List with `data` (data frame with `pentagon` column),
-#'   `not_na` (logical), and `extra` (named list of non-cell columns).
+#'   `not_na` (logical), `extra` (named list of non-cell columns),
+#'   and `a5_cells` (the non-NA a5_cell vector for Arrow conversion).
 #' @noRd
 prepare_data <- function(cells) {
   if (a5R::is_a5_cell(cells)) {
     hex <- format(cells)
     not_na <- !is.na(hex)
     df <- data.frame(pentagon = hex[not_na], stringsAsFactors = FALSE)
-    return(list(data = df, not_na = not_na, extra = list()))
+    return(list(
+      data = df, not_na = not_na, extra = list(),
+      a5_cells = cells[not_na]
+    ))
   }
 
   cell_col <- find_cell_column(cells)
@@ -32,7 +36,10 @@ prepare_data <- function(cells) {
   names(extra) <- other_cols
 
   df <- data.frame(pentagon = hex[not_na], stringsAsFactors = FALSE)
-  list(data = df, not_na = not_na, extra = extra)
+  list(
+    data = df, not_na = not_na, extra = extra,
+    a5_cells = cells[[cell_col]][not_na]
+  )
 }
 
 #' Resolve elevation column name from NSE expression

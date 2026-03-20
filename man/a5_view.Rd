@@ -7,6 +7,7 @@
 a5_view(
   cells,
   fill = "#74ac90ff",
+  fill_identity = FALSE,
   palette = "Viridis",
   opacity = 0.3,
   tooltip = TRUE,
@@ -36,6 +37,11 @@ per-cell colours.
 \item An unquoted column name when \code{cells} is a data frame.
 Default: \code{"#3388ff"}.
 }}
+
+\item{fill_identity}{Logical. When \code{TRUE}, treat \code{fill} values as
+literal colours rather than mapping through \code{palette}. Accepts
+packed RGB integers (\verb{(R << 16) | (G << 8) | B}) or hex colour
+strings. Default: \code{FALSE}.}
 
 \item{palette}{Colour palette used when \code{fill} is numeric. Either a
 palette name accepted by \code{\link[grDevices:palettes]{grDevices::hcl.colors()}} (e.g.

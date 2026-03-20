@@ -120,20 +120,69 @@ test_that("a5_view errors on mismatched fill length", {
   expect_error(a5_view(cells, fill = 1:3), "length 3")
 })
 
+# --- Fill identity ---
+
+test_that("fill_identity works with packed RGB integers", {
+  cells <- make_cells(3)
+  # Red, green, blue as packed uint32: (R << 16) | (G << 8) | B
+  rgb_packed <- c(
+    bitwOr(bitwShiftL(255L, 16L), bitwOr(bitwShiftL(0L, 8L), 0L)),   # red
+    bitwOr(bitwShiftL(0L, 16L), bitwOr(bitwShiftL(255L, 8L), 0L)),   # green
+    bitwOr(bitwShiftL(0L, 16L), bitwOr(bitwShiftL(0L, 8L), 255L))    # blue
+  )
+  w <- a5_view(cells, fill = rgb_packed, fill_identity = TRUE)
+  expect_true(w$x$fill_per_cell)
+  expect_false(w$x$fill_is_column)
+  # Verify RGBA encoded in Arrow IPC
+  tbl <- arrow::read_ipc_stream(base64enc::base64decode(w$x$arrow_ipc))
+  expect_equal(as.integer(tbl[["_fill_r"]]), c(255L, 0L, 0L))
+  expect_equal(as.integer(tbl[["_fill_g"]]), c(0L, 255L, 0L))
+  expect_equal(as.integer(tbl[["_fill_b"]]), c(0L, 0L, 255L))
+  expect_equal(as.integer(tbl[["_fill_a"]]), c(255L, 255L, 255L))
+})
+
+test_that("fill_identity works with hex colour strings", {
+  cells <- make_cells(3)
+  hex_cols <- c("#ff0000", "#00ff00", "#0000ff")
+  w <- a5_view(cells, fill = hex_cols, fill_identity = TRUE)
+  expect_true(w$x$fill_per_cell)
+  tbl <- arrow::read_ipc_stream(base64enc::base64decode(w$x$arrow_ipc))
+  expect_equal(as.integer(tbl[["_fill_r"]]), c(255L, 0L, 0L))
+  expect_equal(as.integer(tbl[["_fill_g"]]), c(0L, 255L, 0L))
+})
+
+test_that("fill_identity works with column name", {
+  cells <- make_cells(3)
+  rgb_packed <- c(16711680L, 65280L, 255L)  # red, green, blue
+  df <- data.frame(cell = cells, rgb = rgb_packed)
+  w <- a5_view(df, fill = rgb, fill_identity = TRUE)
+  expect_true(w$x$fill_per_cell)
+  tbl <- arrow::read_ipc_stream(base64enc::base64decode(w$x$arrow_ipc))
+  expect_equal(as.integer(tbl[["_fill_r"]]), c(255L, 0L, 0L))
+})
+
+test_that("fill_identity errors on uniform fill", {
+  cells <- make_cells(3)
+  expect_error(a5_view(cells, fill = "#ff0000", fill_identity = TRUE), "fill_identity")
+})
+
 # --- Palette ---
 
-test_that("a5_view uses custom colour palette", {
+test_that("a5_view with custom colour palette pre-computes RGBA", {
   cells <- make_cells(5)
   vals <- as.numeric(1:5)
   w <- a5_view(cells, fill = vals, palette = c("#000000", "#ffffff"))
-  expect_length(w$x$palette, 2)
+  # Palette mapping is done R-side; JS receives pre-computed RGBA
+  expect_null(w$x$palette)
+  expect_true(w$x$fill_per_cell)
 })
 
-test_that("a5_view uses named palette", {
+test_that("a5_view with named palette pre-computes RGBA", {
   cells <- make_cells(5)
   vals <- as.numeric(1:5)
   w <- a5_view(cells, fill = vals, palette = "Inferno")
-  expect_length(w$x$palette, 8)
+  expect_null(w$x$palette)
+  expect_true(w$x$fill_per_cell)
 })
 
 # --- Border ---
@@ -215,12 +264,15 @@ test_that("a5_view sets sizing policy with zero padding", {
 
 # --- Data payload ---
 
-test_that("a5_view payload uses columnar data", {
+test_that("a5_view payload has inline base64 Arrow IPC", {
   cells <- make_cells(3)
   w <- a5_view(cells)
-  expect_true(is.list(w$x$columns))
-  expect_true("pentagon" %in% names(w$x$columns))
-  expect_length(w$x$columns$pentagon, 3)
+  # Arrow IPC base64 string present
+  expect_true(is.character(w$x$arrow_ipc))
+  expect_true(nchar(w$x$arrow_ipc) > 0)
+  # Arrow JS dependency attached
+  dep_names <- vapply(w$dependencies, function(d) d$name, character(1))
+  expect_true("apache-arrow-js" %in% dep_names)
 })
 
 # --- Shiny bindings ---
@@ -232,4 +284,100 @@ test_that("a5_viewOutput returns shiny output", {
 
 test_that("a5_viewOutput errors on non-string", {
   expect_error(a5_viewOutput(123), "single string")
+})
+
+# --- renderA5_view ---
+
+test_that("renderA5_view returns a shiny render function", {
+  fn <- renderA5_view(a5_view(make_cells(3)))
+  expect_true(is.function(fn))
+})
+
+test_that("renderA5_view works with quoted expression", {
+  fn <- renderA5_view(quote(a5_view(make_cells(3))), quoted = TRUE)
+  expect_true(is.function(fn))
+})
+
+# --- a5_view_update ---
+
+test_that("a5_view_update builds correct message with bare cells", {
+  cells <- make_cells(5)
+  captured <- NULL
+  mock_session <- list(
+    sendCustomMessage = function(type, message) {
+      captured <<- list(type = type, message = message)
+    }
+  )
+  a5_view_update(mock_session, "map", cells)
+  expect_equal(captured$type, "a5view-update-map")
+  msg <- captured$message
+  expect_true(is.character(msg$arrow_ipc))
+  expect_true(nchar(msg$arrow_ipc) > 0)
+  expect_false(msg$fill_is_column)
+  expect_true(msg$tooltip)
+})
+
+test_that("a5_view_update builds correct message with numeric fill", {
+  cells <- make_cells(5)
+  vals <- as.numeric(1:5)
+  captured <- NULL
+  mock_session <- list(
+    sendCustomMessage = function(type, message) {
+      captured <<- list(type = type, message = message)
+    }
+  )
+  a5_view_update(mock_session, "map", cells, fill = vals, palette = "Viridis")
+  msg <- captured$message
+  expect_true(msg$fill_is_column)
+  expect_true(msg$fill_per_cell)
+  expect_true(msg$has_fill_value)
+  # Arrow IPC should contain RGBA columns
+  tbl <- arrow::read_ipc_stream(base64enc::base64decode(msg$arrow_ipc))
+  expect_true("_fill_r" %in% names(tbl))
+  expect_true("_fill_value" %in% names(tbl))
+})
+
+test_that("a5_view_update builds correct message with data frame", {
+  cells <- make_cells(3)
+  df <- data.frame(cell = cells, score = c(1.0, 2.0, 3.0))
+  captured <- NULL
+  mock_session <- list(
+    sendCustomMessage = function(type, message) {
+      captured <<- list(type = type, message = message)
+    }
+  )
+  a5_view_update(mock_session, "map", df, fill = score)
+  msg <- captured$message
+  expect_true(msg$fill_is_column)
+  expect_equal(msg$domain, c(1, 3))
+})
+
+test_that("a5_view_update passes tooltip = FALSE", {
+  cells <- make_cells(3)
+  captured <- NULL
+  mock_session <- list(
+    sendCustomMessage = function(type, message) {
+      captured <<- list(type = type, message = message)
+    }
+  )
+  a5_view_update(mock_session, "map", cells, tooltip = FALSE)
+  expect_false(captured$message$tooltip)
+})
+
+test_that("a5_view_update validates cells", {
+  mock_session <- list(sendCustomMessage = function(...) {})
+  expect_error(a5_view_update(mock_session, "map", 1:10), "a5_cell")
+})
+
+test_that("a5_view_update returns invisible NULL", {
+  cells <- make_cells(3)
+  captured <- NULL
+  mock_session <- list(
+    sendCustomMessage = function(type, message) {
+      captured <<- list(type = type, message = message)
+    }
+  )
+  result <- a5_view_update(mock_session, "map", cells)
+  expect_null(result)
+  expect_false(is.null(captured))
 })
