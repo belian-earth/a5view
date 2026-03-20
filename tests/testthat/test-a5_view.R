@@ -285,3 +285,99 @@ test_that("a5_viewOutput returns shiny output", {
 test_that("a5_viewOutput errors on non-string", {
   expect_error(a5_viewOutput(123), "single string")
 })
+
+# --- renderA5_view ---
+
+test_that("renderA5_view returns a shiny render function", {
+  fn <- renderA5_view(a5_view(make_cells(3)))
+  expect_true(is.function(fn))
+})
+
+test_that("renderA5_view works with quoted expression", {
+  fn <- renderA5_view(quote(a5_view(make_cells(3))), quoted = TRUE)
+  expect_true(is.function(fn))
+})
+
+# --- a5_view_update ---
+
+test_that("a5_view_update builds correct message with bare cells", {
+  cells <- make_cells(5)
+  captured <- NULL
+  mock_session <- list(
+    sendCustomMessage = function(type, message) {
+      captured <<- list(type = type, message = message)
+    }
+  )
+  a5_view_update(mock_session, "map", cells)
+  expect_equal(captured$type, "a5view-update-map")
+  msg <- captured$message
+  expect_true(is.character(msg$arrow_ipc))
+  expect_true(nchar(msg$arrow_ipc) > 0)
+  expect_false(msg$fill_is_column)
+  expect_true(msg$tooltip)
+})
+
+test_that("a5_view_update builds correct message with numeric fill", {
+  cells <- make_cells(5)
+  vals <- as.numeric(1:5)
+  captured <- NULL
+  mock_session <- list(
+    sendCustomMessage = function(type, message) {
+      captured <<- list(type = type, message = message)
+    }
+  )
+  a5_view_update(mock_session, "map", cells, fill = vals, palette = "Viridis")
+  msg <- captured$message
+  expect_true(msg$fill_is_column)
+  expect_true(msg$fill_per_cell)
+  expect_true(msg$has_fill_value)
+  # Arrow IPC should contain RGBA columns
+  tbl <- arrow::read_ipc_stream(base64enc::base64decode(msg$arrow_ipc))
+  expect_true("_fill_r" %in% names(tbl))
+  expect_true("_fill_value" %in% names(tbl))
+})
+
+test_that("a5_view_update builds correct message with data frame", {
+  cells <- make_cells(3)
+  df <- data.frame(cell = cells, score = c(1.0, 2.0, 3.0))
+  captured <- NULL
+  mock_session <- list(
+    sendCustomMessage = function(type, message) {
+      captured <<- list(type = type, message = message)
+    }
+  )
+  a5_view_update(mock_session, "map", df, fill = score)
+  msg <- captured$message
+  expect_true(msg$fill_is_column)
+  expect_equal(msg$domain, c(1, 3))
+})
+
+test_that("a5_view_update passes tooltip = FALSE", {
+  cells <- make_cells(3)
+  captured <- NULL
+  mock_session <- list(
+    sendCustomMessage = function(type, message) {
+      captured <<- list(type = type, message = message)
+    }
+  )
+  a5_view_update(mock_session, "map", cells, tooltip = FALSE)
+  expect_false(captured$message$tooltip)
+})
+
+test_that("a5_view_update validates cells", {
+  mock_session <- list(sendCustomMessage = function(...) {})
+  expect_error(a5_view_update(mock_session, "map", 1:10), "a5_cell")
+})
+
+test_that("a5_view_update returns invisible NULL", {
+  cells <- make_cells(3)
+  captured <- NULL
+  mock_session <- list(
+    sendCustomMessage = function(type, message) {
+      captured <<- list(type = type, message = message)
+    }
+  )
+  result <- a5_view_update(mock_session, "map", cells)
+  expect_null(result)
+  expect_false(is.null(captured))
+})
