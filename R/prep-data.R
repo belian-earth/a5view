@@ -94,9 +94,9 @@ guess_zoom <- function(coords) {
   lat_range <- diff(range(coords$lat, na.rm = TRUE))
   span <- max(lng_range, lat_range)
   if (span < 1e-6) {
-    return(10L)
+    return(24L)
   }
   span <- span * 1.3
   z <- log2(360 / span)
-  max(1L, min(18L, floor(z)))
+  max(1L, min(24L, floor(z)))
 }

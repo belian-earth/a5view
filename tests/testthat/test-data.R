@@ -106,9 +106,9 @@ test_that("resolve_elevation_col errors on missing column", {
 
 # --- guess_zoom ---
 
-test_that("guess_zoom returns 10 for single point", {
+test_that("guess_zoom returns 24 for single point", {
   coords <- data.frame(lon = 0, lat = 0)
-  expect_equal(guess_zoom(coords), 10L)
+  expect_equal(guess_zoom(coords), 24L)
 })
 
 test_that("guess_zoom returns reasonable zoom for small area", {
@@ -124,11 +124,11 @@ test_that("guess_zoom returns low zoom for large area", {
   expect_equal(z, 1L)
 })
 
-test_that("guess_zoom is bounded between 1 and 18", {
+test_that("guess_zoom is bounded between 1 and 24", {
   # Very small span
-  coords <- data.frame(lon = c(0, 0.0001), lat = c(0, 0.0001))
+  coords <- data.frame(lon = c(0, 0.00001), lat = c(0, 0.00001))
   z <- guess_zoom(coords)
-  expect_true(z <= 18L)
+  expect_true(z <= 24L)
 
   # Huge span
   coords <- data.frame(lon = c(-180, 180), lat = c(-90, 90))
@@ -165,7 +165,7 @@ test_that("auto_view respects partial overrides", {
 
   result <- auto_view(hex_ids, lng = 42)
   expect_equal(result$longitude, 42)
-  expect_true(result$latitude != 42)  # computed, not overridden
+  expect_true(result$latitude != 42) # computed, not overridden
 
   result2 <- auto_view(hex_ids, zoom = 3)
   expect_equal(result2$zoom, 3)
