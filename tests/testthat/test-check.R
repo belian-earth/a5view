@@ -148,3 +148,16 @@ test_that("check_palette rejects non-character", {
   expect_error(check_palette(42), "palette name")
   expect_error(check_palette(TRUE), "palette name")
 })
+
+test_that("check_draw_polygon accepts TRUE/FALSE", {
+  expect_no_error(check_draw_polygon(TRUE))
+  expect_no_error(check_draw_polygon(FALSE))
+})
+
+test_that("check_draw_polygon rejects non-bool", {
+  expect_error(check_draw_polygon(NULL), "TRUE.*FALSE")
+  expect_error(check_draw_polygon(NA), "TRUE.*FALSE")
+  expect_error(check_draw_polygon(1), "TRUE.*FALSE")
+  expect_error(check_draw_polygon("yes"), "TRUE.*FALSE")
+  expect_error(check_draw_polygon(c(TRUE, FALSE)), "TRUE.*FALSE")
+})

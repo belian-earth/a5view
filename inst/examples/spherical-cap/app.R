@@ -139,6 +139,22 @@ server <- function(input, output, session) {
     }
   })
 
+  # Smoke test: log polygon WKT and round-trip through a5_grid
+  observeEvent(input$map_polygon_draw, {
+    wkt <- input$map_polygon_draw
+    message("[draw] polygon WKT: ", wkt)
+    cells_in <- tryCatch(
+      a5R::a5_grid(wk::wkt(wkt), resolution = resolution),
+      error = function(e) {
+        message("[draw] a5_grid failed: ", conditionMessage(e))
+        NULL
+      }
+    )
+    if (!is.null(cells_in)) {
+      message("[draw] cells inside polygon: ", length(cells_in))
+    }
+  })
+
   # Click toggles pin: first click pins, second click unpins
   observeEvent(input$map_click_coord, {
     if (pinned()) {
@@ -169,7 +185,8 @@ server <- function(input, output, session) {
       globe = globe,
       # basemap = "dark",
       opacity = 0.9,
-      tooltip = FALSE
+      tooltip = FALSE,
+      draw_polygon = TRUE
     )
     if (!is.null(cap$dist)) {
       args$fill <- cap$dist

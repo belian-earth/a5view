@@ -42,6 +42,18 @@
 #'   first element is shown initially. When multiple basemaps are given,
 #'   an interactive selector is shown. Use `"none"` for no basemap.
 #'   Default: all four options.
+#' @param draw_polygon Logical. When `TRUE`, adds a "Draw polygon"
+#'   toggle to the controls panel. While draw mode is active, clicks
+#'   place polygon vertices and a double-click closes the polygon.
+#'   On completion, the polygon is emitted to Shiny as a WKT string at
+#'   `input$<id>_polygon_draw`; the drawn outline is held on screen
+#'   until the user toggles draw mode off, presses Escape, or starts a
+#'   new polygon. While draw mode is on, deck.gl's
+#'   double-click-to-zoom is suppressed and cell-pick click events do
+#'   not fire. The widget itself does not visualise which cells fall
+#'   inside the polygon — resolve the WKT server-side (e.g. with
+#'   [a5R::a5_grid()]) and update the map fills via [a5_view_update()].
+#'   Only useful in a Shiny context. Default: `FALSE`.
 #' @returns An htmlwidget.
 #'
 #' @export
@@ -62,7 +74,8 @@ a5_view <- function(
   lat = NULL,
   zoom = NULL,
   globe = FALSE,
-  basemap = c("dark", "light", "osm", "satellite")
+  basemap = c("dark", "light", "osm", "satellite"),
+  draw_polygon = FALSE
 ) {
   # --- Validate all arguments ---
   check_cells(cells)
@@ -81,6 +94,7 @@ a5_view <- function(
   check_basemap(basemap)
   check_tooltip(tooltip)
   check_palette(palette)
+  check_draw_polygon(draw_polygon)
   if (!rlang::is_bool(fill_identity)) {
     cli::cli_abort("{.arg fill_identity} must be {.val TRUE} or {.val FALSE}.")
   }
@@ -195,7 +209,8 @@ a5_view <- function(
     line_width = border_width,
     view_state = view_state,
     globe = globe,
-    basemaps = as.list(basemap)
+    basemaps = as.list(basemap),
+    draw_polygon = draw_polygon
   )
 
   widget <- htmlwidgets::createWidget(
