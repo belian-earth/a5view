@@ -10,6 +10,27 @@ HTMLWidgets.widget({
     var currentViewState = null;
     var ACCENT = "#74ac90";
 
+    // Polygon-draw mode state (per-widget). The widget only handles the
+    // drawing UX and emits WKT to Shiny on completion — visualising the
+    // resulting cell selection is the R caller's responsibility.
+    var drawEnabled = false;       // is the feature enabled at all?
+    var drawMode = false;          // is drawing currently active?
+    var drawVertices = [];         // [[lon, lat], ...]
+    var drawCursor = null;         // [lon, lat] live preview
+    var drawClickTimer = null;     // pending single-click vertex add
+    var drawToggleBtn = null;      // toolbar button for the toggle
+    var polygonCommitted = false;  // last polygon completed; held on screen
+    var DRAW_DBLCLICK_MS = 280;
+
+    // Stable layer cache: tile + A5 + click-highlight reused across frames
+    // when none of their inputs have changed (cursor moves alone don't
+    // invalidate). Keyed by a string of the inputs they depend on.
+    var stableLayersCache = null;
+    var stableLayersKey = null;
+
+    // RAF coalescing for redraws driven by mouse movement
+    var rafScheduled = false;
+
     var BASEMAP_TILES = {
       dark: {
         label: "Dark",
@@ -48,6 +69,14 @@ HTMLWidgets.widget({
       '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">' +
         '<circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.3" opacity="0.9"/>' +
         '<path d="M8 1.5A6.5 6.5 0 0 0 8 14.5Z" fill="currentColor" opacity="0.5"/>' +
+      '</svg>';
+
+    var DRAW_SVG =
+      '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+        '<path d="M3 12L8 3L13 12L3 12Z" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linejoin="round"/>' +
+        '<circle cx="3" cy="12" r="1.6" fill="currentColor"/>' +
+        '<circle cx="8" cy="3" r="1.6" fill="currentColor"/>' +
+        '<circle cx="13" cy="12" r="1.6" fill="currentColor"/>' +
       '</svg>';
 
     function makeTileLayer(basemapKey) {
@@ -284,9 +313,7 @@ HTMLWidgets.widget({
         currentOpacity = val / 100;
         labelVal.textContent = val + "%";
         slider.style.setProperty("--pct", val + "%");
-        if (deckgl && lastPayload) {
-          deckgl.setProps({ layers: buildLayers(lastPayload) });
-        }
+        scheduleRedraw();
       });
 
       // Prevent map interaction while dragging slider
@@ -298,7 +325,134 @@ HTMLWidgets.widget({
       op.drop.appendChild(panel);
       toolbar.appendChild(op.el);
 
+      // --- Draw polygon toggle ---
+      if (drawEnabled) {
+        var drawCtrl = document.createElement("div");
+        drawCtrl.className = "a5v-ctrl";
+
+        var drawBtn = document.createElement("button");
+        drawBtn.className = "a5v-toggle" + (drawMode ? " open" : "");
+        drawBtn.innerHTML = DRAW_SVG;
+        drawBtn.title = "Draw polygon (click to place vertices, double-click to finish)";
+
+        drawBtn.addEventListener("click", function(e) {
+          e.stopPropagation();
+          setDrawMode(!drawMode, container);
+        });
+
+        drawCtrl.appendChild(drawBtn);
+        toolbar.appendChild(drawCtrl);
+        drawToggleBtn = drawBtn;
+      }
+
       container.appendChild(toolbar);
+    }
+
+    function setDrawMode(on, container) {
+      drawMode = !!on;
+      if (drawToggleBtn) drawToggleBtn.classList.toggle("open", drawMode);
+      if (container) container.style.cursor = drawMode ? "crosshair" : "";
+
+      // Pull focus into the widget so the ESC keydown listener on el
+      // fires without the user first clicking the map.
+      if (drawMode && container && container.focus) {
+        try { container.focus({ preventScroll: true }); } catch (_) { container.focus(); }
+      }
+
+      // Cancel any pending vertex add
+      if (drawClickTimer) {
+        clearTimeout(drawClickTimer);
+        drawClickTimer = null;
+      }
+
+      // Clear in-progress vertices when toggling off
+      if (!drawMode) {
+        drawVertices = [];
+        drawCursor = null;
+        polygonCommitted = false;
+      } else {
+        // Drop any cell highlight so it doesn't render over the draw overlay
+        hoveredPentagon = null;
+        clickedPentagon = null;
+      }
+
+      // Suppress deck.gl's built-in doubleClickZoom while drawing — we use
+      // double-click to close the polygon and don't want the map to zoom.
+      if (deckgl) {
+        deckgl.setProps({
+          controller: drawMode ? { doubleClickZoom: false } : true
+        });
+      }
+
+      if (deckgl && lastPayload) {
+        deckgl.setProps({ layers: buildLayers(lastPayload) });
+      }
+    }
+
+    function completeDrawnPolygon() {
+      if (drawVertices.length < 3) {
+        // Not a valid polygon — discard and reset
+        drawVertices = [];
+        drawCursor = null;
+        polygonCommitted = false;
+        scheduleRedraw();
+        return;
+      }
+
+      // Build WKT POLYGON((lon lat, lon lat, ..., lon lat)) — closed ring
+      var ring = drawVertices.slice();
+      var first = ring[0];
+      var last = ring[ring.length - 1];
+      if (first[0] !== last[0] || first[1] !== last[1]) {
+        ring.push([first[0], first[1]]);
+      }
+      var coords = ring.map(function(p) {
+        return p[0] + " " + p[1];
+      }).join(", ");
+      var wkt = "POLYGON((" + coords + "))";
+
+      if (typeof Shiny !== "undefined" && Shiny.setInputValue) {
+        Shiny.setInputValue(el.id + "_polygon_draw", wkt, {priority: "event"});
+      }
+
+      // Hold the completed polygon and its cell highlight on screen until the
+      // user toggles draw mode off, hits ESC, or starts a new polygon.
+      drawCursor = null;
+      polygonCommitted = true;
+      scheduleRedraw();
+    }
+
+    function scheduleRedraw() {
+      if (rafScheduled) return;
+      rafScheduled = true;
+      requestAnimationFrame(function() {
+        rafScheduled = false;
+        if (deckgl && lastPayload) {
+          deckgl.setProps({ layers: buildLayers(lastPayload) });
+        }
+      });
+    }
+
+    function handleDrawClick(coordinate) {
+      // First click of a potential double-click: schedule add-vertex.
+      // Second click within DRAW_DBLCLICK_MS: cancel and complete polygon.
+      if (drawClickTimer) {
+        clearTimeout(drawClickTimer);
+        drawClickTimer = null;
+        completeDrawnPolygon();
+        return;
+      }
+      var coord = [coordinate[0], coordinate[1]];
+      drawClickTimer = setTimeout(function() {
+        drawClickTimer = null;
+        // First vertex after a committed polygon clears the previous shape.
+        if (polygonCommitted) {
+          drawVertices = [];
+          polygonCommitted = false;
+        }
+        drawVertices.push(coord);
+        scheduleRedraw();
+      }, DRAW_DBLCLICK_MS);
     }
 
     var lastPayload = null;
@@ -388,6 +542,7 @@ HTMLWidgets.widget({
     var cachedFillColorArray = null;
     var cachedPickingData = null;
     var cachedDataLength = -1;
+    var dataVersion = 0; // bump on each data swap; used as a stable cache key
 
     function ensureCachedArrays(x) {
       var n = x.data.length;
@@ -400,6 +555,7 @@ HTMLWidgets.widget({
 
     function invalidateCache() {
       cachedDataLength = -1;
+      dataVersion++;
     }
 
     function buildA5Layer(x) {
@@ -419,15 +575,14 @@ HTMLWidgets.widget({
         opacity: currentOpacity,
         extruded: x.extruded,
         elevationScale: x.elevation_scale,
-        pickable: x.pickable,
+        // While drawing, A5Layer must not claim picks — clicks are vertices.
+        pickable: x.pickable && !drawMode,
         autoHighlight: false,
         onHover: function(info) {
           var newHover = (info && info.object) ? info.object.pentagon : null;
           if (newHover !== hoveredPentagon) {
             hoveredPentagon = newHover;
-            if (deckgl && lastPayload) {
-              deckgl.setProps({ layers: buildLayers(lastPayload) });
-            }
+            scheduleRedraw();
             if (typeof Shiny !== "undefined" && Shiny.setInputValue) {
               Shiny.setInputValue(el.id + "_hover", pentToHex(newHover), {priority: "event"});
             }
@@ -486,13 +641,94 @@ HTMLWidgets.widget({
       });
     }
 
-    function buildLayers(x) {
+    function buildDrawLayers() {
+      if (!drawMode) return [];
+
+      // Vertices, plus cursor as a transient last point for the live preview.
+      // Once the polygon is committed, the cursor no longer extends the ring.
+      var pts = drawVertices.slice();
+      var preview = (drawCursor && pts.length > 0 && !polygonCommitted)
+        ? pts.concat([drawCursor])
+        : pts;
+
+      var layers = [];
+
+      // Filled polygon preview (>=3 points including cursor)
+      if (preview.length >= 3) {
+        layers.push(new deck.SolidPolygonLayer({
+          id: "a5-draw-fill",
+          data: [{ polygon: preview }],
+          getPolygon: function(d) { return d.polygon; },
+          getFillColor: [116, 172, 144, 60],
+          pickable: false,
+          parameters: { depthTest: false }
+        }));
+      }
+
+      // Outline as a path. Closed ring if >=3 points; open polyline otherwise.
+      if (preview.length >= 2) {
+        var pathPts = preview.slice();
+        if (preview.length >= 3) {
+          pathPts.push(preview[0]);
+        }
+        layers.push(new deck.PathLayer({
+          id: "a5-draw-path",
+          data: [{ path: pathPts }],
+          getPath: function(d) { return d.path; },
+          getColor: [116, 172, 144, 230],
+          getWidth: 2,
+          widthUnits: "pixels",
+          pickable: false,
+          parameters: { depthTest: false }
+        }));
+      }
+
+      // Vertex markers (only the placed vertices, not the cursor)
+      if (drawVertices.length > 0) {
+        layers.push(new deck.ScatterplotLayer({
+          id: "a5-draw-vertices",
+          data: drawVertices.map(function(p) { return { position: p }; }),
+          getPosition: function(d) { return d.position; },
+          getFillColor: [255, 255, 255, 255],
+          getLineColor: [116, 172, 144, 255],
+          stroked: true,
+          getRadius: 5,
+          radiusUnits: "pixels",
+          getLineWidth: 2,
+          lineWidthUnits: "pixels",
+          pickable: false,
+          parameters: { depthTest: false }
+        }));
+      }
+
+      return layers;
+    }
+
+    function getStableLayers(x) {
+      // Reuse the (possibly heavy) tile + A5 + click-highlight layer
+      // instances unless one of their actual inputs has changed. Cursor
+      // movement alone never busts this cache.
+      var key = currentBasemap + "|" + currentOpacity + "|" + currentGlobe
+        + "|" + drawMode + "|" + (hoveredPentagon || "") + "|"
+        + (clickedPentagon || "") + "|" + dataVersion;
+      if (key === stableLayersKey && stableLayersCache) {
+        return stableLayersCache;
+      }
       var layers = [];
       var tileLayer = makeTileLayer(currentBasemap);
       if (tileLayer) layers.push(tileLayer);
       layers.push(buildA5Layer(x));
       var highlight = buildHighlightLayer();
       if (highlight) layers.push(highlight);
+      stableLayersKey = key;
+      stableLayersCache = layers;
+      return layers;
+    }
+
+    function buildLayers(x) {
+      var layers = getStableLayers(x).slice();
+      var drawLayers = buildDrawLayers();
+      for (var i = 0; i < drawLayers.length; i++) layers.push(drawLayers[i]);
       return layers;
     }
 
@@ -565,6 +801,12 @@ HTMLWidgets.widget({
     function renderDeck(x) {
         lastPayload = x;
         currentOpacity = x.opacity;
+        drawEnabled = !!x.draw_polygon;
+        if (!drawEnabled) {
+          drawMode = false;
+          drawVertices = [];
+          drawCursor = null;
+        }
 
         var basemaps = x.basemaps || ["dark"];
         currentBasemap = basemaps[0];
@@ -624,6 +866,14 @@ HTMLWidgets.widget({
               currentViewState = e.viewState;
             },
             onHover: function(info) {
+              if (drawMode && info && info.coordinate) {
+                if (polygonCommitted) return;
+                drawCursor = [info.coordinate[0], info.coordinate[1]];
+                if (drawVertices.length > 0) {
+                  scheduleRedraw();
+                }
+                return;
+              }
               if (typeof Shiny !== "undefined" && Shiny.setInputValue && info && info.coordinate) {
                 Shiny.setInputValue(el.id + "_cursor", {
                   lng: info.coordinate[0],
@@ -632,6 +882,10 @@ HTMLWidgets.widget({
               }
             },
             onClick: function(info) {
+              if (drawMode && info && info.coordinate) {
+                handleDrawClick(info.coordinate);
+                return;
+              }
               if (typeof Shiny !== "undefined" && Shiny.setInputValue && info && info.coordinate) {
                 Shiny.setInputValue(el.id + "_click_coord", {
                   lng: info.coordinate[0],
@@ -655,9 +909,26 @@ HTMLWidgets.widget({
 
           currentGlobe = wantGlobe;
           deckgl = new deck.DeckGL(deckProps);
+
+          // ESC cancels an in-progress draw and clears any committed
+          // polygon. Listener is scoped to el (no cross-widget leak); el
+          // is made focusable below and gets focused on entering draw
+          // mode so the keydown reliably fires.
+          el.addEventListener("keydown", function(e) {
+            if (e.key !== "Escape" || !drawMode) return;
+            if (drawClickTimer) { clearTimeout(drawClickTimer); drawClickTimer = null; }
+            drawVertices = [];
+            drawCursor = null;
+            polygonCommitted = false;
+            scheduleRedraw();
+          });
+          if (el.tabIndex < 0) el.tabIndex = 0;
         }
 
         buildControls(basemaps, el);
+
+        // Keep cursor styling consistent when controls are rebuilt
+        if (drawMode) el.style.cursor = "crosshair";
     }
 
     return widgetObj;

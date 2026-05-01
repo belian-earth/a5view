@@ -108,6 +108,15 @@ check_tooltip <- function(tooltip) {
 }
 
 #' @noRd
+check_draw_polygon <- function(draw_polygon) {
+  if (!rlang::is_bool(draw_polygon)) {
+    cli::cli_abort(
+      "{.arg draw_polygon} must be {.val TRUE} or {.val FALSE}, not {.obj_type_friendly {draw_polygon}}."
+    )
+  }
+}
+
+#' @noRd
 check_palette <- function(palette) {
   if (is.character(palette) && length(palette) == 1L) {
     available <- grDevices::hcl.pals()

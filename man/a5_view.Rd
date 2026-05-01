@@ -21,7 +21,8 @@ a5_view(
   lat = NULL,
   zoom = NULL,
   globe = FALSE,
-  basemap = c("dark", "light", "osm", "satellite")
+  basemap = c("dark", "light", "osm", "satellite"),
+  draw_polygon = FALSE
 )
 }
 \arguments{
@@ -79,6 +80,19 @@ Options are \code{"dark"}, \code{"light"}, \code{"osm"}, and \code{"satellite"}.
 first element is shown initially. When multiple basemaps are given,
 an interactive selector is shown. Use \code{"none"} for no basemap.
 Default: all four options.}
+
+\item{draw_polygon}{Logical. When \code{TRUE}, adds a "Draw polygon"
+toggle to the controls panel. While draw mode is active, clicks
+place polygon vertices and a double-click closes the polygon.
+On completion, the polygon is emitted to Shiny as a WKT string at
+\verb{input$<id>_polygon_draw}; the drawn outline is held on screen
+until the user toggles draw mode off, presses Escape, or starts a
+new polygon. While draw mode is on, deck.gl's
+double-click-to-zoom is suppressed and cell-pick click events do
+not fire. The widget itself does not visualise which cells fall
+inside the polygon — resolve the WKT server-side (e.g. with
+\code{\link[a5R:a5_grid]{a5R::a5_grid()}}) and update the map fills via \code{\link[=a5_view_update]{a5_view_update()}}.
+Only useful in a Shiny context. Default: \code{FALSE}.}
 }
 \value{
 An htmlwidget.

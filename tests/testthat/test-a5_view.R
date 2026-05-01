@@ -275,6 +275,27 @@ test_that("a5_view payload has inline base64 Arrow IPC", {
   expect_true("apache-arrow-js" %in% dep_names)
 })
 
+# --- Draw polygon ---
+
+test_that("a5_view defaults draw_polygon to FALSE in payload", {
+  cells <- make_cells(3)
+  w <- a5_view(cells)
+  expect_false(w$x$draw_polygon)
+})
+
+test_that("a5_view passes draw_polygon = TRUE through to payload", {
+  cells <- make_cells(3)
+  w <- a5_view(cells, draw_polygon = TRUE)
+  expect_true(w$x$draw_polygon)
+})
+
+test_that("a5_view errors on non-bool draw_polygon", {
+  cells <- make_cells(3)
+  expect_error(a5_view(cells, draw_polygon = "yes"), "TRUE.*FALSE")
+  expect_error(a5_view(cells, draw_polygon = 1), "TRUE.*FALSE")
+  expect_error(a5_view(cells, draw_polygon = NA), "TRUE.*FALSE")
+})
+
 # --- Shiny bindings ---
 
 test_that("a5_viewOutput returns shiny output", {

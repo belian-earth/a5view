@@ -50,3 +50,33 @@ Features:
 - Cell border styling
 - 3D extrusion via `elevation`
 - Shiny bindings (`a5_viewOutput` / `renderA5_view`)
+- Optional polygon-draw toolbar (`draw_polygon = TRUE`) for selecting
+  an area of interest
+
+## Polygon draw mode (Shiny only)
+
+Setting `draw_polygon = TRUE` adds a draw-polygon toggle to the
+toolbar. Clicks place vertices, a double-click closes the polygon,
+and the result is sent to Shiny as a WKT string at
+`input$<id>_polygon_draw`. The widget itself does not visualise which
+cells fall inside the polygon — the canonical pattern is to resolve
+the WKT server-side and update the map fills via `a5_view_update()`.
+Outside Shiny there is no input listener, so the feature has no
+effect.
+
+``` r
+a5_viewOutput("map")
+
+# server
+output$map <- renderA5_view({
+  a5_view(my_cells, draw_polygon = TRUE)
+})
+
+observeEvent(input$map_polygon_draw, {
+  cells_in_poly <- a5R::a5_grid(wk::wkt(input$map_polygon_draw), resolution = 4L)
+  # ... use cells_in_poly, e.g. a5_view_update() with selection-driven fills.
+})
+```
+
+See `inst/examples/polygon-select/app.R` for a complete demo combining
+single-cell click selection with polygon-based selection.
