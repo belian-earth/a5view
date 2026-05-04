@@ -24,8 +24,7 @@ Imports:
     htmlwidgets,
     rlang (>= 1.0.0)
 Suggests:
-    testthat (>= 3.0.0),
-    webshot2
+    testthat (>= 3.0.0)
 Remotes:
     belian-earth/a5R,
     r-spatial/geoarrowWidget
