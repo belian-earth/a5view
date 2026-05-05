@@ -616,7 +616,15 @@ HTMLWidgets.widget({
       }
 
       if (currentGlobe) {
-        layerProps.parameters = { depthTest: false };
+        // Skip depth-testing so A5 polygons don't z-fight the basemap
+        // tiles on the sphere surface, and cull the back hemisphere by
+        // face direction instead. On a globe viewed from outside, far-
+        // side polygons face away from the camera, so back-face culling
+        // hides them cleanly.
+        layerProps.parameters = {
+          depthCompare: "always",
+          cullMode: "back"
+        };
       }
 
       return new deck.A5Layer(layerProps);
