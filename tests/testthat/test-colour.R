@@ -75,6 +75,146 @@ test_that("cells_rgb round-trips through identity_to_rgba", {
   expect_equal(rgba[[3]], c(128L, 128L, 128L, 255L))
 })
 
+# --- cells_pca_rgb ---
+
+# Reproducible synthetic embedding: 50 cells × 8 features
+make_embedding <- function(seed = 1, n = 50, d = 8) {
+  set.seed(seed)
+  matrix(stats::rnorm(n * d), nrow = n, ncol = d)
+}
+
+test_that("cells_pca_rgb returns a packed-integer vector of correct length", {
+  skip_if_not_installed("irlba")
+  mat <- make_embedding()
+  result <- cells_pca_rgb(mat)
+  expect_type(result, "integer")
+  expect_length(result, nrow(mat))
+  expect_true(all(result >= 0L & result <= 0xFFFFFFL))
+})
+
+test_that("cells_pca_rgb accepts list-column and matrix interchangeably", {
+  skip_if_not_installed("irlba")
+  mat <- make_embedding()
+  lst <- lapply(seq_len(nrow(mat)), function(i) mat[i, ])
+  # prcomp_irlba uses random init so seed both calls identically.
+  set.seed(42); a <- cells_pca_rgb(mat)
+  set.seed(42); b <- cells_pca_rgb(lst)
+  expect_equal(a, b)
+})
+
+test_that("cells_pca_rgb clip = NULL changes output vs default clipping", {
+  skip_if_not_installed("irlba")
+  mat <- make_embedding()
+  expect_false(identical(
+    cells_pca_rgb(mat, clip = c(0.02, 0.98)),
+    cells_pca_rgb(mat, clip = NULL)
+  ))
+})
+
+test_that("cells_pca_rgb errors when irlba is missing", {
+  local_mocked_bindings(is_installed = function(...) FALSE, .package = "rlang")
+  expect_error(cells_pca_rgb(make_embedding()), "irlba")
+})
+
+test_that("cells_pca_rgb errors on too few rows", {
+  skip_if_not_installed("irlba")
+  expect_error(
+    cells_pca_rgb(matrix(stats::rnorm(9), nrow = 3, ncol = 3)),
+    "at least 4"
+  )
+})
+
+test_that("cells_pca_rgb errors on too few features", {
+  skip_if_not_installed("irlba")
+  expect_error(
+    cells_pca_rgb(matrix(stats::rnorm(20), nrow = 10, ncol = 2)),
+    "at least 3"
+  )
+})
+
+test_that("cells_pca_rgb errors on NA in input", {
+  skip_if_not_installed("irlba")
+  mat <- make_embedding()
+  mat[1, 1] <- NA
+  expect_error(cells_pca_rgb(mat), "NA")
+})
+
+test_that("cells_pca_rgb errors on ragged list", {
+  skip_if_not_installed("irlba")
+  expect_error(
+    cells_pca_rgb(list(c(1, 2, 3), c(1, 2, 3, 4))),
+    "same length"
+  )
+})
+
+test_that("cells_pca_rgb errors on non-numeric list elements", {
+  skip_if_not_installed("irlba")
+  expect_error(
+    cells_pca_rgb(list(c("a", "b", "c"), c("d", "e", "f"))),
+    "numeric"
+  )
+})
+
+test_that("cells_pca_rgb errors on empty input", {
+  skip_if_not_installed("irlba")
+  expect_error(cells_pca_rgb(list()), "non-empty")
+  expect_error(cells_pca_rgb(list(numeric(0), numeric(0))), "non-empty")
+})
+
+test_that("cells_pca_rgb validates clip argument", {
+  skip_if_not_installed("irlba")
+  mat <- make_embedding()
+  expect_error(cells_pca_rgb(mat, clip = 0.5), "length-2")
+  expect_error(cells_pca_rgb(mat, clip = c(0, NA)), "length-2")
+  expect_error(cells_pca_rgb(mat, clip = c(-0.1, 1)), "within")
+  expect_error(cells_pca_rgb(mat, clip = c(0.9, 0.1)), "increasing")
+})
+
+test_that("cells_pca_rgb rgb_pcs reorders channels", {
+  skip_if_not_installed("irlba")
+  mat <- make_embedding()
+  set.seed(42); default <- cells_pca_rgb(mat)
+  set.seed(42); swapped <- cells_pca_rgb(mat, rgb_pcs = c(3, 2, 1))
+
+  # Same PCA fit, just R and B channel bytes swapped: (R<<16)|(G<<8)|B
+  # vs (B<<16)|(G<<8)|R. Decompose both and check.
+  default_rgba <- identity_to_rgba(default)
+  swapped_rgba <- identity_to_rgba(swapped)
+  for (i in seq_along(default_rgba)) {
+    expect_equal(default_rgba[[i]][1], swapped_rgba[[i]][3])
+    expect_equal(default_rgba[[i]][2], swapped_rgba[[i]][2])
+    expect_equal(default_rgba[[i]][3], swapped_rgba[[i]][1])
+  }
+})
+
+test_that("cells_pca_rgb rgb_pcs negative index flips PC sign", {
+  skip_if_not_installed("irlba")
+  mat <- make_embedding()
+  set.seed(42); a <- cells_pca_rgb(mat, rgb_pcs = c(1, 2, 3), clip = NULL)
+  set.seed(42); b <- cells_pca_rgb(mat, rgb_pcs = c(-1, 2, 3), clip = NULL)
+
+  # Flipping PC1 reflects red across its midpoint (per-channel auto-rescale
+  # uses the flipped vector's own min/max, which equals the negated old
+  # max/min). Net effect: red byte goes to (255 - old_red).
+  a_rgba <- identity_to_rgba(a)
+  b_rgba <- identity_to_rgba(b)
+  for (i in seq_along(a_rgba)) {
+    expect_equal(b_rgba[[i]][1], 255L - a_rgba[[i]][1])
+    expect_equal(a_rgba[[i]][2:3], b_rgba[[i]][2:3])
+  }
+})
+
+test_that("cells_pca_rgb validates rgb_pcs argument", {
+  skip_if_not_installed("irlba")
+  mat <- make_embedding()
+  expect_error(cells_pca_rgb(mat, rgb_pcs = c(1, 2)), "permutation")
+  expect_error(cells_pca_rgb(mat, rgb_pcs = c(1, 2, 4)), "permutation")
+  expect_error(cells_pca_rgb(mat, rgb_pcs = c(1, 1, 2)), "permutation")
+  expect_error(cells_pca_rgb(mat, rgb_pcs = c(0, 1, 2)), "permutation")
+  expect_error(cells_pca_rgb(mat, rgb_pcs = c(1.5, 2, 3)), "permutation")
+  expect_error(cells_pca_rgb(mat, rgb_pcs = c(1, NA, 3)), "permutation")
+})
+
 # --- hex_to_rgba ---
 
 test_that("hex_to_rgba converts hex to integer RGBA", {

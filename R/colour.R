@@ -62,6 +62,144 @@ cells_rgb <- function(r, g, b, range = NULL) {
   bitwOr(bitwOr(bitwShiftL(rb, 16L), bitwShiftL(gb, 8L)), bb)
 }
 
+#' Build per-cell RGB colours from the first three principal components
+#' of an embedding
+#'
+#' Convenience helper for the common embedding-visualisation workflow:
+#' stack a list-column (or matrix) of equal-length numeric vectors,
+#' run a 3-component PCA, percentile-clip the scores per channel to
+#' tame outliers, and pack into integer RGB suitable for [a5_view()]
+#' with `fill_identity = TRUE`. Output is handed off to [cells_rgb()].
+#'
+#' Requires the `irlba` package, which is much faster than a full SVD
+#' when only the top three components are needed.
+#'
+#' @param x A list of numeric vectors of identical length (e.g. an arrow
+#'   list-column of embeddings) or a numeric matrix with rows = cells
+#'   and columns = features. Must not contain `NA`.
+#' @param clip Length-2 numeric percentile range applied per principal
+#'   component to clip outliers before colour mapping. Default
+#'   `c(0.02, 0.98)`. Set to `NULL` to skip clipping.
+#' @param scale Passed to `irlba::prcomp_irlba(..., scale. = scale)`.
+#'   Standardises features to unit variance before PCA. Default `TRUE`.
+#' @param rgb_pcs Length-3 signed integer vector specifying which PC
+#'   maps to each colour channel, in red/green/blue order. The default
+#'   `c(1, 2, 3)` assigns PC1 to red, PC2 to green and PC3 to blue.
+#'   Negative values flip the sign of the corresponding PC, useful
+#'   because PCA components are arbitrary up to sign — e.g.
+#'   `c(1, -2, 3)` uses `-PC2` for green. Must be a signed permutation
+#'   of `1:3`.
+#'
+#' @return An integer vector of packed RGB values, the same length as
+#'   the number of rows in `x`.
+#'
+#' @examples
+#' \dontrun{
+#' df$rgb <- cells_pca_rgb(df$embedding)
+#' a5_view(df, fill = rgb, fill_identity = TRUE)
+#'
+#' # Reorder and flip a channel for better contrast:
+#' df$rgb <- cells_pca_rgb(df$embedding, rgb_pcs = c(3, -1, 2))
+#' }
+#'
+#' @export
+cells_pca_rgb <- function(x, clip = c(0.02, 0.98), scale = TRUE,
+                          rgb_pcs = c(1, 2, 3)) {
+  if (!rlang::is_installed("irlba")) {
+    cli::cli_abort(c(
+      "{.fn cells_pca_rgb} requires the {.pkg irlba} package.",
+      "i" = "Install with {.code install.packages(\"irlba\")}."
+    ))
+  }
+  if (!is.null(clip)) {
+    if (!is.numeric(clip) || length(clip) != 2L || anyNA(clip)) {
+      cli::cli_abort("{.arg clip} must be a length-2 numeric vector.")
+    }
+    if (clip[1] < 0 || clip[2] > 1 || clip[1] >= clip[2]) {
+      cli::cli_abort("{.arg clip} must be increasing within [0, 1].")
+    }
+  }
+  if (!is.numeric(rgb_pcs) || length(rgb_pcs) != 3L || anyNA(rgb_pcs) ||
+      any(rgb_pcs != as.integer(rgb_pcs)) || any(rgb_pcs == 0L) ||
+      !setequal(abs(rgb_pcs), 1:3)) {
+    cli::cli_abort(
+      "{.arg rgb_pcs} must be a signed permutation of {.code 1:3} \\
+       (e.g. {.code c(1, 2, 3)} or {.code c(1, -2, 3)})."
+    )
+  }
+
+  mat <- as_embedding_matrix(x)
+  if (nrow(mat) < 4L) {
+    cli::cli_abort(
+      "{.arg x} has {nrow(mat)} row{?s}; need at least 4 for a 3-component PCA."
+    )
+  }
+  if (ncol(mat) < 3L) {
+    cli::cli_abort(
+      "{.arg x} has {ncol(mat)} feature{?s}; need at least 3 for a 3-component PCA."
+    )
+  }
+
+  fit <- irlba::prcomp_irlba(mat, n = 3L, scale. = scale)
+  scores <- fit$x
+
+  if (!is.null(clip)) {
+    scores[, 1L] <- clip_quantile(scores[, 1L], clip)
+    scores[, 2L] <- clip_quantile(scores[, 2L], clip)
+    scores[, 3L] <- clip_quantile(scores[, 3L], clip)
+  }
+
+  idx <- abs(rgb_pcs)
+  sgn <- sign(rgb_pcs)
+  cells_rgb(
+    scores[, idx[1L]] * sgn[1L],
+    scores[, idx[2L]] * sgn[2L],
+    scores[, idx[3L]] * sgn[3L]
+  )
+}
+
+#' Coerce a list-of-vectors or matrix into a numeric matrix (rows = cells)
+#' @noRd
+as_embedding_matrix <- function(x) {
+  if (is.matrix(x) && is.numeric(x)) {
+    if (anyNA(x)) {
+      cli::cli_abort("{.arg x} must not contain {.val NA} values.")
+    }
+    return(x)
+  }
+  if (is.list(x) && !is.data.frame(x)) {
+    lens <- lengths(x)
+    if (length(x) == 0L || any(lens == 0L)) {
+      cli::cli_abort("All elements of {.arg x} must be non-empty.")
+    }
+    if (length(unique(lens)) != 1L) {
+      cli::cli_abort(
+        "All elements of {.arg x} must have the same length \\
+         (got lengths {.val {sort(unique(lens))}})."
+      )
+    }
+    flat <- unlist(x, use.names = FALSE)
+    if (!is.numeric(flat)) {
+      cli::cli_abort("All elements of {.arg x} must be numeric.")
+    }
+    if (anyNA(flat)) {
+      cli::cli_abort("{.arg x} must not contain {.val NA} values.")
+    }
+    return(matrix(flat, nrow = length(x), ncol = lens[1], byrow = TRUE))
+  }
+  cli::cli_abort(
+    "{.arg x} must be a numeric matrix or a list of numeric vectors, \\
+     not {.obj_type_friendly {x}}."
+  )
+}
+
+#' Clip a numeric vector to a quantile range
+#' @noRd
+clip_quantile <- function(x, range) {
+  q <- stats::quantile(x, range, na.rm = TRUE, names = FALSE)
+  pmin(pmax(x, q[1]), q[2])
+}
+
 #' Rescale a numeric vector to the integer range 0:255 given bounds
 #' @noRd
 rescale_byte <- function(x, lo, hi) {
@@ -79,7 +217,9 @@ rescale_byte <- function(x, lo, hi) {
 #' Rescale using a vector's own min/max, propagating all-NA as NA
 #' @noRd
 rescale_byte_auto <- function(x) {
-  if (all(is.na(x))) return(rep(NA_integer_, length(x)))
+  if (all(is.na(x))) {
+    return(rep(NA_integer_, length(x)))
+  }
   rescale_byte(x, min(x, na.rm = TRUE), max(x, na.rm = TRUE))
 }
 
@@ -273,8 +413,14 @@ identity_to_rgba <- function(values) {
     r <- bitwAnd(bitwShiftR(vals, 16L), 0xFFL)
     g <- bitwAnd(bitwShiftR(vals, 8L), 0xFFL)
     b <- bitwAnd(vals, 0xFFL)
-    mapply(function(ri, gi, bi) c(ri, gi, bi, 255L), r, g, b,
-           SIMPLIFY = FALSE, USE.NAMES = FALSE)
+    mapply(
+      function(ri, gi, bi) c(ri, gi, bi, 255L),
+      r,
+      g,
+      b,
+      SIMPLIFY = FALSE,
+      USE.NAMES = FALSE
+    )
   } else if (is.character(values)) {
     lapply(values, hex_to_rgba)
   } else {
@@ -296,7 +442,10 @@ values_to_rgba <- function(values, domain, palette) {
   } else {
     t <- pmin(1, pmax(0, (values - domain[1]) / rng))
   }
-  idx <- pmin(length(pal_hex), pmax(1L, as.integer(t * (length(pal_hex) - 1)) + 1L))
+  idx <- pmin(
+    length(pal_hex),
+    pmax(1L, as.integer(t * (length(pal_hex) - 1)) + 1L)
+  )
   rgba <- grDevices::col2rgb(pal_hex[idx], alpha = TRUE)
   list(
     r = as.integer(rgba[1L, ]),

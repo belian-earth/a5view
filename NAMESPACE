@@ -3,5 +3,6 @@
 export(a5_view)
 export(a5_viewOutput)
 export(a5_view_update)
+export(cells_pca_rgb)
 export(cells_rgb)
 export(renderA5_view)
