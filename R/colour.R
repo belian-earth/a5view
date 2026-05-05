@@ -1,5 +1,88 @@
 # Fill, palette, and colour resolution
 
+#' Build per-cell packed-integer RGB colours from three numeric channels
+#'
+#' Convenience helper for the common workflow of rescaling three numeric
+#' vectors (e.g. spectral bands) to `0:255` and combining them into the
+#' packed `(R << 16) | (G << 8) | B` integer form expected by
+#' [a5_view()] with `fill_identity = TRUE`.
+#'
+#' Each channel is rescaled to `0:255` independently using its own
+#' min/max, unless `range` is supplied, in which case the same bounds
+#' are applied to all three channels (useful when the bands are
+#' radiometrically comparable). Values outside `range` are clipped.
+#' `NA` inputs propagate to `NA` in the output. Constant channels (or
+#' channels that are entirely `NA` under per-channel scaling) contribute
+#' zero.
+#'
+#' @param r,g,b Numeric vectors of identical length supplying the red,
+#'   green and blue channels.
+#' @param range Optional length-2 numeric `c(min, max)` shared across all
+#'   three channels. `NULL` (default) rescales each channel independently.
+#'
+#' @return An integer vector of packed RGB values, the same length as
+#'   the inputs.
+#'
+#' @examples
+#' n <- 5
+#' df <- data.frame(b1 = runif(n), b2 = runif(n), b3 = runif(n))
+#' df$rgb <- cells_rgb(df$b1, df$b2, df$b3)
+#'
+#' @export
+cells_rgb <- function(r, g, b, range = NULL) {
+  n <- length(r)
+  if (length(g) != n || length(b) != n) {
+    cli::cli_abort(
+      "{.arg r}, {.arg g} and {.arg b} must be the same length \\
+       (got {length(r)}, {length(g)}, {length(b)})."
+    )
+  }
+  if (!is.numeric(r) || !is.numeric(g) || !is.numeric(b)) {
+    cli::cli_abort(
+      "{.arg r}, {.arg g} and {.arg b} must be numeric vectors."
+    )
+  }
+
+  if (!is.null(range)) {
+    if (!is.numeric(range) || length(range) != 2L || anyNA(range)) {
+      cli::cli_abort("{.arg range} must be a length-2 numeric vector.")
+    }
+    if (range[1] == range[2]) {
+      cli::cli_abort("{.arg range} must have distinct min and max.")
+    }
+    rb <- rescale_byte(r, range[1], range[2])
+    gb <- rescale_byte(g, range[1], range[2])
+    bb <- rescale_byte(b, range[1], range[2])
+  } else {
+    rb <- rescale_byte_auto(r)
+    gb <- rescale_byte_auto(g)
+    bb <- rescale_byte_auto(b)
+  }
+
+  bitwOr(bitwOr(bitwShiftL(rb, 16L), bitwShiftL(gb, 8L)), bb)
+}
+
+#' Rescale a numeric vector to the integer range 0:255 given bounds
+#' @noRd
+rescale_byte <- function(x, lo, hi) {
+  if (!is.finite(lo) || !is.finite(hi)) {
+    return(rep(NA_integer_, length(x)))
+  }
+  if (hi == lo) {
+    out <- rep(0L, length(x))
+    out[is.na(x)] <- NA_integer_
+    return(out)
+  }
+  as.integer(round(pmin(pmax((x - lo) / (hi - lo), 0), 1) * 255))
+}
+
+#' Rescale using a vector's own min/max, propagating all-NA as NA
+#' @noRd
+rescale_byte_auto <- function(x) {
+  if (all(is.na(x))) return(rep(NA_integer_, length(x)))
+  rescale_byte(x, min(x, na.rm = TRUE), max(x, na.rm = TRUE))
+}
+
 #' Resolve fill argument into a typed result
 #' @noRd
 resolve_fill <- function(cells, fill, fill_expr, n_cells) {

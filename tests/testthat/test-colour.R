@@ -1,5 +1,80 @@
 # Tests for R/colour.R — fill, palette, and colour resolution
 
+# --- cells_rgb ---
+
+# Helper: pack r, g, b bytes into the (R << 16) | (G << 8) | B integer
+pack_rgb <- function(r, g, b) {
+  bitwOr(bitwOr(bitwShiftL(r, 16L), bitwShiftL(g, 8L)), b)
+}
+
+test_that("cells_rgb rescales each channel to its own min/max", {
+  result <- cells_rgb(c(0, 0.5, 1), c(1, 0.5, 0), c(0, 0.5, 1))
+  expect_equal(
+    result,
+    pack_rgb(c(0L, 128L, 255L), c(255L, 128L, 0L), c(0L, 128L, 255L))
+  )
+})
+
+test_that("cells_rgb propagates NA when any channel is NA", {
+  result <- cells_rgb(c(0, NA, 1), c(0, 0.5, 1), c(0, 1, NA))
+  expect_equal(result, c(0L, NA_integer_, NA_integer_))
+})
+
+test_that("cells_rgb maps a constant channel to zero", {
+  result <- cells_rgb(c(0.5, 0.5, 0.5), c(0, 0.5, 1), c(1, 0, 0.5))
+  expect_equal(
+    result,
+    pack_rgb(c(0L, 0L, 0L), c(0L, 128L, 255L), c(255L, 0L, 128L))
+  )
+})
+
+test_that("cells_rgb returns NA for an entirely NA channel under per-channel scaling", {
+  result <- cells_rgb(c(NA_real_, NA_real_), c(0, 1), c(0, 1))
+  expect_equal(result, c(NA_integer_, NA_integer_))
+})
+
+test_that("cells_rgb applies and clips a shared range", {
+  result <- cells_rgb(
+    c(-1, 0, 1, 2),
+    c(0, 0.5, 1, 1.5),
+    c(0, 0, 1, 1),
+    range = c(0, 1)
+  )
+  expect_equal(
+    result,
+    pack_rgb(c(0L, 0L, 255L, 255L), c(0L, 128L, 255L, 255L), c(0L, 0L, 255L, 255L))
+  )
+})
+
+test_that("cells_rgb errors when channel lengths differ", {
+  expect_error(cells_rgb(1:3, 1:2, 1:3), "same length")
+})
+
+test_that("cells_rgb errors on non-numeric input", {
+  expect_error(cells_rgb(c("a", "b"), 1:2, 1:2), "numeric")
+})
+
+test_that("cells_rgb errors on malformed range", {
+  expect_error(cells_rgb(0:1, 0:1, 0:1, range = 1), "length-2")
+  expect_error(cells_rgb(0:1, 0:1, 0:1, range = c(0, NA)), "length-2")
+  expect_error(cells_rgb(0:1, 0:1, 0:1, range = c(1, 1)), "distinct")
+})
+
+test_that("cells_rgb output is integer in the packed-RGB range", {
+  result <- cells_rgb(runif(10), runif(10), runif(10))
+  expect_type(result, "integer")
+  expect_length(result, 10)
+  expect_true(all(result >= 0L & result <= 0xFFFFFFL))
+})
+
+test_that("cells_rgb round-trips through identity_to_rgba", {
+  packed <- cells_rgb(c(0, 1, 0.5), c(1, 0, 0.5), c(0, 1, 0.5))
+  rgba <- identity_to_rgba(packed)
+  expect_equal(rgba[[1]], c(0L, 255L, 0L, 255L))
+  expect_equal(rgba[[2]], c(255L, 0L, 255L, 255L))
+  expect_equal(rgba[[3]], c(128L, 128L, 128L, 255L))
+})
+
 # --- hex_to_rgba ---
 
 test_that("hex_to_rgba converts hex to integer RGBA", {
