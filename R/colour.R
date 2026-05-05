@@ -62,6 +62,123 @@ cells_rgb <- function(r, g, b, range = NULL) {
   bitwOr(bitwOr(bitwShiftL(rb, 16L), bitwShiftL(gb, 8L)), bb)
 }
 
+#' Build per-cell RGB colours from the first three principal components
+#' of an embedding
+#'
+#' Convenience helper for the common embedding-visualisation workflow:
+#' stack a list-column (or matrix) of equal-length numeric vectors,
+#' run a 3-component PCA, percentile-clip the scores per channel to
+#' tame outliers, and pack into integer RGB suitable for [a5_view()]
+#' with `fill_identity = TRUE`. Output is handed off to [cells_rgb()].
+#'
+#' Requires the `irlba` package, which is much faster than a full SVD
+#' when only the top three components are needed.
+#'
+#' @param x A list of numeric vectors of identical length (e.g. an arrow
+#'   list-column of embeddings) or a numeric matrix with rows = cells
+#'   and columns = features. Must not contain `NA`.
+#' @param clip Length-2 numeric percentile range applied per principal
+#'   component to clip outliers before colour mapping. Default
+#'   `c(0.02, 0.98)`. Set to `NULL` to skip clipping.
+#' @param scale Passed to `irlba::prcomp_irlba(..., scale. = scale)`.
+#'   Standardises features to unit variance before PCA. Default `TRUE`.
+#'
+#' @return An integer vector of packed RGB values, the same length as
+#'   the number of rows in `x`.
+#'
+#' @examples
+#' \dontrun{
+#' df$rgb <- cells_pca_rgb(df$embedding)
+#' a5_view(df, fill = rgb, fill_identity = TRUE)
+#' }
+#'
+#' @export
+cells_pca_rgb <- function(x, clip = c(0.02, 0.98), scale = TRUE) {
+  if (!rlang::is_installed("irlba")) {
+    cli::cli_abort(c(
+      "{.fn cells_pca_rgb} requires the {.pkg irlba} package.",
+      "i" = "Install with {.code install.packages(\"irlba\")}."
+    ))
+  }
+  if (!is.null(clip)) {
+    if (!is.numeric(clip) || length(clip) != 2L || anyNA(clip)) {
+      cli::cli_abort("{.arg clip} must be a length-2 numeric vector.")
+    }
+    if (clip[1] < 0 || clip[2] > 1 || clip[1] >= clip[2]) {
+      cli::cli_abort("{.arg clip} must be increasing within [0, 1].")
+    }
+  }
+
+  mat <- as_embedding_matrix(x)
+  if (nrow(mat) < 4L) {
+    cli::cli_abort(
+      "{.arg x} has {nrow(mat)} row{?s}; need at least 4 for a 3-component PCA."
+    )
+  }
+  if (ncol(mat) < 3L) {
+    cli::cli_abort(
+      "{.arg x} has {ncol(mat)} feature{?s}; need at least 3 for a 3-component PCA."
+    )
+  }
+
+  fit <- irlba::prcomp_irlba(mat, n = 3L, scale. = scale)
+  scores <- fit$x
+
+  pc1 <- scores[, 1L]
+  pc2 <- scores[, 2L]
+  pc3 <- scores[, 3L]
+
+  if (!is.null(clip)) {
+    pc1 <- clip_quantile(pc1, clip)
+    pc2 <- clip_quantile(pc2, clip)
+    pc3 <- clip_quantile(pc3, clip)
+  }
+
+  cells_rgb(pc1, pc2, pc3)
+}
+
+#' Coerce a list-of-vectors or matrix into a numeric matrix (rows = cells)
+#' @noRd
+as_embedding_matrix <- function(x) {
+  if (is.matrix(x) && is.numeric(x)) {
+    if (anyNA(x)) {
+      cli::cli_abort("{.arg x} must not contain {.val NA} values.")
+    }
+    return(x)
+  }
+  if (is.list(x) && !is.data.frame(x)) {
+    lens <- lengths(x)
+    if (length(x) == 0L || any(lens == 0L)) {
+      cli::cli_abort("All elements of {.arg x} must be non-empty.")
+    }
+    if (length(unique(lens)) != 1L) {
+      cli::cli_abort(
+        "All elements of {.arg x} must have the same length \\
+         (got lengths {.val {sort(unique(lens))}})."
+      )
+    }
+    flat <- unlist(x, use.names = FALSE)
+    if (!is.numeric(flat)) {
+      cli::cli_abort("All elements of {.arg x} must be numeric.")
+    }
+    if (anyNA(flat)) {
+      cli::cli_abort("{.arg x} must not contain {.val NA} values.")
+    }
+    return(matrix(flat, nrow = length(x), ncol = lens[1], byrow = TRUE))
+  }
+  cli::cli_abort(
+    "{.arg x} must be a numeric matrix or a list of numeric vectors, \\
+     not {.obj_type_friendly {x}}."
+  )
+}
+
+#' Clip a numeric vector to a quantile range
+#' @noRd
+clip_quantile <- function(x, range) {
+  q <- stats::quantile(x, range, na.rm = TRUE, names = FALSE)
+  pmin(pmax(x, q[1]), q[2])
+}
+
 #' Rescale a numeric vector to the integer range 0:255 given bounds
 #' @noRd
 rescale_byte <- function(x, lo, hi) {
