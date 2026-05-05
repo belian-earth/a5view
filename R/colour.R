@@ -134,7 +134,7 @@ cells_pca_rgb <- function(x, clip = c(0.02, 0.98), scale = TRUE) {
     pc3 <- clip_quantile(pc3, clip)
   }
 
-  cells_rgb(pc1, pc2, pc3)
+  cells_rgb(pc3, pc1, pc2)
 }
 
 #' Coerce a list-of-vectors or matrix into a numeric matrix (rows = cells)
@@ -196,7 +196,9 @@ rescale_byte <- function(x, lo, hi) {
 #' Rescale using a vector's own min/max, propagating all-NA as NA
 #' @noRd
 rescale_byte_auto <- function(x) {
-  if (all(is.na(x))) return(rep(NA_integer_, length(x)))
+  if (all(is.na(x))) {
+    return(rep(NA_integer_, length(x)))
+  }
   rescale_byte(x, min(x, na.rm = TRUE), max(x, na.rm = TRUE))
 }
 
@@ -390,8 +392,14 @@ identity_to_rgba <- function(values) {
     r <- bitwAnd(bitwShiftR(vals, 16L), 0xFFL)
     g <- bitwAnd(bitwShiftR(vals, 8L), 0xFFL)
     b <- bitwAnd(vals, 0xFFL)
-    mapply(function(ri, gi, bi) c(ri, gi, bi, 255L), r, g, b,
-           SIMPLIFY = FALSE, USE.NAMES = FALSE)
+    mapply(
+      function(ri, gi, bi) c(ri, gi, bi, 255L),
+      r,
+      g,
+      b,
+      SIMPLIFY = FALSE,
+      USE.NAMES = FALSE
+    )
   } else if (is.character(values)) {
     lapply(values, hex_to_rgba)
   } else {
@@ -413,7 +421,10 @@ values_to_rgba <- function(values, domain, palette) {
   } else {
     t <- pmin(1, pmax(0, (values - domain[1]) / rng))
   }
-  idx <- pmin(length(pal_hex), pmax(1L, as.integer(t * (length(pal_hex) - 1)) + 1L))
+  idx <- pmin(
+    length(pal_hex),
+    pmax(1L, as.integer(t * (length(pal_hex) - 1)) + 1L)
+  )
   rgba <- grDevices::col2rgb(pal_hex[idx], alpha = TRUE)
   list(
     r = as.integer(rgba[1L, ]),
