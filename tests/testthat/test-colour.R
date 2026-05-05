@@ -170,6 +170,51 @@ test_that("cells_pca_rgb validates clip argument", {
   expect_error(cells_pca_rgb(mat, clip = c(0.9, 0.1)), "increasing")
 })
 
+test_that("cells_pca_rgb rgb_pcs reorders channels", {
+  skip_if_not_installed("irlba")
+  mat <- make_embedding()
+  set.seed(42); default <- cells_pca_rgb(mat)
+  set.seed(42); swapped <- cells_pca_rgb(mat, rgb_pcs = c(3, 2, 1))
+
+  # Same PCA fit, just R and B channel bytes swapped: (R<<16)|(G<<8)|B
+  # vs (B<<16)|(G<<8)|R. Decompose both and check.
+  default_rgba <- identity_to_rgba(default)
+  swapped_rgba <- identity_to_rgba(swapped)
+  for (i in seq_along(default_rgba)) {
+    expect_equal(default_rgba[[i]][1], swapped_rgba[[i]][3])
+    expect_equal(default_rgba[[i]][2], swapped_rgba[[i]][2])
+    expect_equal(default_rgba[[i]][3], swapped_rgba[[i]][1])
+  }
+})
+
+test_that("cells_pca_rgb rgb_pcs negative index flips PC sign", {
+  skip_if_not_installed("irlba")
+  mat <- make_embedding()
+  set.seed(42); a <- cells_pca_rgb(mat, rgb_pcs = c(1, 2, 3), clip = NULL)
+  set.seed(42); b <- cells_pca_rgb(mat, rgb_pcs = c(-1, 2, 3), clip = NULL)
+
+  # Flipping PC1 reflects red across its midpoint (per-channel auto-rescale
+  # uses the flipped vector's own min/max, which equals the negated old
+  # max/min). Net effect: red byte goes to (255 - old_red).
+  a_rgba <- identity_to_rgba(a)
+  b_rgba <- identity_to_rgba(b)
+  for (i in seq_along(a_rgba)) {
+    expect_equal(b_rgba[[i]][1], 255L - a_rgba[[i]][1])
+    expect_equal(a_rgba[[i]][2:3], b_rgba[[i]][2:3])
+  }
+})
+
+test_that("cells_pca_rgb validates rgb_pcs argument", {
+  skip_if_not_installed("irlba")
+  mat <- make_embedding()
+  expect_error(cells_pca_rgb(mat, rgb_pcs = c(1, 2)), "permutation")
+  expect_error(cells_pca_rgb(mat, rgb_pcs = c(1, 2, 4)), "permutation")
+  expect_error(cells_pca_rgb(mat, rgb_pcs = c(1, 1, 2)), "permutation")
+  expect_error(cells_pca_rgb(mat, rgb_pcs = c(0, 1, 2)), "permutation")
+  expect_error(cells_pca_rgb(mat, rgb_pcs = c(1.5, 2, 3)), "permutation")
+  expect_error(cells_pca_rgb(mat, rgb_pcs = c(1, NA, 3)), "permutation")
+})
+
 # --- hex_to_rgba ---
 
 test_that("hex_to_rgba converts hex to integer RGBA", {

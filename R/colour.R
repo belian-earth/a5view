@@ -82,6 +82,13 @@ cells_rgb <- function(r, g, b, range = NULL) {
 #'   `c(0.02, 0.98)`. Set to `NULL` to skip clipping.
 #' @param scale Passed to `irlba::prcomp_irlba(..., scale. = scale)`.
 #'   Standardises features to unit variance before PCA. Default `TRUE`.
+#' @param rgb_pcs Length-3 signed integer vector specifying which PC
+#'   maps to each colour channel, in red/green/blue order. The default
+#'   `c(1, 2, 3)` assigns PC1 to red, PC2 to green and PC3 to blue.
+#'   Negative values flip the sign of the corresponding PC, useful
+#'   because PCA components are arbitrary up to sign — e.g.
+#'   `c(1, -2, 3)` uses `-PC2` for green. Must be a signed permutation
+#'   of `1:3`.
 #'
 #' @return An integer vector of packed RGB values, the same length as
 #'   the number of rows in `x`.
@@ -90,10 +97,14 @@ cells_rgb <- function(r, g, b, range = NULL) {
 #' \dontrun{
 #' df$rgb <- cells_pca_rgb(df$embedding)
 #' a5_view(df, fill = rgb, fill_identity = TRUE)
+#'
+#' # Reorder and flip a channel for better contrast:
+#' df$rgb <- cells_pca_rgb(df$embedding, rgb_pcs = c(3, -1, 2))
 #' }
 #'
 #' @export
-cells_pca_rgb <- function(x, clip = c(0.02, 0.98), scale = TRUE) {
+cells_pca_rgb <- function(x, clip = c(0.02, 0.98), scale = TRUE,
+                          rgb_pcs = c(1, 2, 3)) {
   if (!rlang::is_installed("irlba")) {
     cli::cli_abort(c(
       "{.fn cells_pca_rgb} requires the {.pkg irlba} package.",
@@ -107,6 +118,14 @@ cells_pca_rgb <- function(x, clip = c(0.02, 0.98), scale = TRUE) {
     if (clip[1] < 0 || clip[2] > 1 || clip[1] >= clip[2]) {
       cli::cli_abort("{.arg clip} must be increasing within [0, 1].")
     }
+  }
+  if (!is.numeric(rgb_pcs) || length(rgb_pcs) != 3L || anyNA(rgb_pcs) ||
+      any(rgb_pcs != as.integer(rgb_pcs)) || any(rgb_pcs == 0L) ||
+      !setequal(abs(rgb_pcs), 1:3)) {
+    cli::cli_abort(
+      "{.arg rgb_pcs} must be a signed permutation of {.code 1:3} \\
+       (e.g. {.code c(1, 2, 3)} or {.code c(1, -2, 3)})."
+    )
   }
 
   mat <- as_embedding_matrix(x)
@@ -124,17 +143,19 @@ cells_pca_rgb <- function(x, clip = c(0.02, 0.98), scale = TRUE) {
   fit <- irlba::prcomp_irlba(mat, n = 3L, scale. = scale)
   scores <- fit$x
 
-  pc1 <- scores[, 1L]
-  pc2 <- scores[, 2L]
-  pc3 <- scores[, 3L]
-
   if (!is.null(clip)) {
-    pc1 <- clip_quantile(pc1, clip)
-    pc2 <- clip_quantile(pc2, clip)
-    pc3 <- clip_quantile(pc3, clip)
+    scores[, 1L] <- clip_quantile(scores[, 1L], clip)
+    scores[, 2L] <- clip_quantile(scores[, 2L], clip)
+    scores[, 3L] <- clip_quantile(scores[, 3L], clip)
   }
 
-  cells_rgb(pc3, pc1, pc2)
+  idx <- abs(rgb_pcs)
+  sgn <- sign(rgb_pcs)
+  cells_rgb(
+    scores[, idx[1L]] * sgn[1L],
+    scores[, idx[2L]] * sgn[2L],
+    scores[, idx[3L]] * sgn[3L]
+  )
 }
 
 #' Coerce a list-of-vectors or matrix into a numeric matrix (rows = cells)

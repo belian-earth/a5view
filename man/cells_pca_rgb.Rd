@@ -5,7 +5,7 @@
 \title{Build per-cell RGB colours from the first three principal components
 of an embedding}
 \usage{
-cells_pca_rgb(x, clip = c(0.02, 0.98), scale = TRUE)
+cells_pca_rgb(x, clip = c(0.02, 0.98), scale = TRUE, rgb_pcs = c(1, 2, 3))
 }
 \arguments{
 \item{x}{A list of numeric vectors of identical length (e.g. an arrow
@@ -18,6 +18,14 @@ component to clip outliers before colour mapping. Default
 
 \item{scale}{Passed to \code{irlba::prcomp_irlba(..., scale. = scale)}.
 Standardises features to unit variance before PCA. Default \code{TRUE}.}
+
+\item{rgb_pcs}{Length-3 signed integer vector specifying which PC
+maps to each colour channel, in red/green/blue order. The default
+\code{c(1, 2, 3)} assigns PC1 to red, PC2 to green and PC3 to blue.
+Negative values flip the sign of the corresponding PC, useful
+because PCA components are arbitrary up to sign — e.g.
+\code{c(1, -2, 3)} uses \code{-PC2} for green. Must be a signed permutation
+of \code{1:3}.}
 }
 \value{
 An integer vector of packed RGB values, the same length as
@@ -38,6 +46,9 @@ when only the top three components are needed.
 \dontrun{
 df$rgb <- cells_pca_rgb(df$embedding)
 a5_view(df, fill = rgb, fill_identity = TRUE)
+
+# Reorder and flip a channel for better contrast:
+df$rgb <- cells_pca_rgb(df$embedding, rgb_pcs = c(3, -1, 2))
 }
 
 }
