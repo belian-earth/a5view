@@ -22,7 +22,9 @@ a5_view(
   zoom = NULL,
   globe = FALSE,
   basemap = c("dark", "light", "osm", "satellite"),
-  draw_polygon = FALSE
+  draw_polygon = FALSE,
+  aggregate = c("none", "rep_child", "mean"),
+  lod_step = 1L
 )
 }
 \arguments{
@@ -101,6 +103,31 @@ not fire. The widget itself does not visualise which cells fall
 inside the polygon — resolve the WKT server-side (e.g. with
 \code{\link[a5R:a5_grid]{a5R::a5_grid()}}) and update the map fills via \code{\link[=a5_view_update]{a5_view_update()}}.
 Only useful in a Shiny context. Default: \code{FALSE}.}
+
+\item{aggregate}{How parent cells are summarised when zooming out.
+One of:
+\itemize{
+\item \code{"none"} (default): no precomputed pyramid. Cells render through
+the standard deck.gl \code{A5Layer}. Cheapest to build, suitable for
+small to medium datasets where you don't need LOD switching.
+\item \code{"rep_child"}: each parent inherits the row of the child whose
+payload (RGBA + optional \code{fill_value}/\code{elevation}) is closest in
+Euclidean distance to its parent's mean. Preserves real values,
+no blending. Use for embedding/RGB visualisations.
+\item \code{"mean"}: each numeric payload column is averaged independently
+within the parent group. Best for scalar fields; blends colours
+in RGB space, which can mute embedding visualisations.
+When set to \code{"rep_child"} or \code{"mean"}, leaf rows render as-is at
+high zoom and aggregated parent rows render at coarser LODs. Above
+50k rows per LOD, rendering routes through deck.gl's \code{TileLayer}
+for stable per-tile GPU caching.
+}}
+
+\item{lod_step}{Integer >= 1, gap between successive precomputed
+LODs (only used when \code{aggregate != "none"}). \code{1} (default)
+precomputes every level from the data resolution down to the
+floor (LOD 2); larger values trade size for fewer levels and more
+visible popping at zoom transitions.}
 }
 \value{
 An htmlwidget.

@@ -10,7 +10,9 @@ a5_view_update(
   cells,
   fill = "#74ac90ff",
   palette = "Viridis",
-  tooltip = TRUE
+  tooltip = TRUE,
+  aggregate = c("none", "rep_child", "mean"),
+  lod_step = 1L
 )
 }
 \arguments{

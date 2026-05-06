@@ -22,12 +22,6 @@ HTMLWidgets.widget({
     var polygonCommitted = false;  // last polygon completed; held on screen
     var DRAW_DBLCLICK_MS = 280;
 
-    // Stable layer cache: tile + A5 + click-highlight reused across frames
-    // when none of their inputs have changed (cursor moves alone don't
-    // invalidate). Keyed by a string of the inputs they depend on.
-    var stableLayersCache = null;
-    var stableLayersKey = null;
-
     // RAF coalescing for redraws driven by mouse movement
     var rafScheduled = false;
 
@@ -79,6 +73,7 @@ HTMLWidgets.widget({
         '<circle cx="13" cy="12" r="1.6" fill="currentColor"/>' +
       '</svg>';
 
+
     function makeTileLayer(basemapKey) {
       if (!basemapKey || basemapKey === "none") return null;
       var info = BASEMAP_TILES[basemapKey];
@@ -118,6 +113,15 @@ HTMLWidgets.widget({
         ".a5v-toolbar{" +
           "position:absolute;top:12px;left:12px;z-index:1;" +
           "display:flex;gap:6px;align-items:flex-start;" +
+        "}" +
+        // Debug zoom/resolution label (bottom-right)
+        ".a5v-debug{" +
+          "position:absolute;bottom:12px;right:12px;z-index:1;" +
+          "padding:5px 9px;color:#bbb;" +
+          "font-family:'Inter',system-ui,-apple-system,sans-serif;" +
+          "font-size:10px;letter-spacing:0.3px;" +
+          "font-variant-numeric:tabular-nums;" +
+          "pointer-events:none;" +
         "}" +
         // Each control wrapper
         ".a5v-ctrl{position:relative;}" +
@@ -433,6 +437,63 @@ HTMLWidgets.widget({
       });
     }
 
+    // Debug label (bottom-right): zoom + computed A5 resolution + lat.
+    // Useful for dialing the BIAS / SLOPE levers in tiling.js.
+    var debugLabel = null;
+    function ensureDebugLabel() {
+      if (debugLabel) return debugLabel;
+      debugLabel = document.createElement("div");
+      debugLabel.className = "a5v-debug";
+      el.appendChild(debugLabel);
+      return debugLabel;
+    }
+    function updateDebugLabel(viewState) {
+      if (!viewState) return;
+      ensureDebugLabel();
+      var zoom = (viewState.zoom != null) ? viewState.zoom.toFixed(2) : "?";
+      var lat = (viewState.latitude != null) ? viewState.latitude.toFixed(1) : "?";
+      var R = (window.A5View && window.A5View.tiling)
+        ? window.A5View.tiling.getA5Resolution(viewState)
+        : "?";
+      debugLabel.textContent = "zoom " + zoom + "  R " + R + "  lat " + lat + "°";
+    }
+
+    // Throttled rebuild for tile-mode viewport changes. Pure debounce
+    // means the first zoom waits the full timer before anything updates
+    // — feels sluggish. Throttle (leading + trailing) rebuilds the
+    // first viewport change immediately, throttles subsequent changes
+    // to one rebuild per REBUILD_THROTTLE_MS window, and fires a final
+    // trailing rebuild when motion stops. Threshold lives in tiling.js.
+    var rebuildTimer = null;
+    var lastRebuildAt = 0;
+    function doRebuild() {
+      lastRebuildAt = (typeof performance !== "undefined")
+        ? performance.now() : Date.now();
+      if (deckgl && lastPayload) {
+        deckgl.setProps({ layers: buildLayers(lastPayload) });
+      }
+    }
+    function scheduleRebuild() {
+      var THROTTLE = (window.A5View && window.A5View.tiling &&
+                      typeof window.A5View.tiling.REBUILD_THROTTLE_MS === "number")
+        ? window.A5View.tiling.REBUILD_THROTTLE_MS : 80;
+      var now = (typeof performance !== "undefined")
+        ? performance.now() : Date.now();
+      var since = now - lastRebuildAt;
+      if (since >= THROTTLE) {
+        // Leading edge: rebuild now, drop any pending trailing call.
+        if (rebuildTimer) { clearTimeout(rebuildTimer); rebuildTimer = null; }
+        doRebuild();
+      } else if (!rebuildTimer) {
+        // Trailing edge: schedule one rebuild at the end of the window.
+        rebuildTimer = setTimeout(function () {
+          rebuildTimer = null;
+          doRebuild();
+        }, THROTTLE - since);
+      }
+      // else: trailing rebuild already pending, do nothing.
+    }
+
     function handleDrawClick(coordinate) {
       // First click of a potential double-click: schedule add-vertex.
       // Second click within DRAW_DBLCLICK_MS: cancel and complete polygon.
@@ -482,67 +543,63 @@ HTMLWidgets.widget({
       return String(p);
     }
 
-    // Build fill color Uint8ClampedArray for deck.gl binary attribute.
-    // RGBA is pre-computed on R side and arrives in Arrow columns.
+    // Bumped on every data swap. The LOD renderer's per-version caches
+    // (group partition, bbox bounds, visible-set) read this to detect
+    // staleness.
+    var dataVersion = 0;
+    // Cached fill / picking arrays for the legacy (aggregate = "none")
+    // A5Layer path. Rebuilt only when data version changes.
+    var cachedFillColorArray = null;
+    var cachedPickingData = null;
+    var cachedDataLength = -1;
+    function invalidateCache() {
+      cachedDataLength = -1;
+      dataVersion++;
+    }
+
+    // Build interleaved [r,g,b,a, ...] Uint8ClampedArray for the
+    // legacy A5Layer accessor. When fill is uniform we still produce
+    // an array so the accessor signature is uniform.
     function buildFillColorArray(x) {
       var cols = x.data;
       var n = cols.length;
       var arr = new Uint8ClampedArray(n * 4);
-
       if (x.fill_per_cell && cols.fillR) {
-        // RGBA pre-computed R-side — interleave into [r,g,b,a, r,g,b,a, ...]
         var rData = cols.fillR.data && cols.fillR.data[0] && cols.fillR.data[0].values;
         if (rData) {
-          // Fast path: direct typed array access from Arrow chunks
           var gData = cols.fillG.data[0].values;
           var bData = cols.fillB.data[0].values;
           var aData = cols.fillA.data[0].values;
           for (var i = 0; i < n; i++) {
             var off = i * 4;
-            arr[off] = rData[i];
-            arr[off + 1] = gData[i];
-            arr[off + 2] = bData[i];
-            arr[off + 3] = aData[i];
+            arr[off] = rData[i]; arr[off + 1] = gData[i];
+            arr[off + 2] = bData[i]; arr[off + 3] = aData[i];
           }
         } else {
-          // Fallback: use .get() accessor
           for (var i = 0; i < n; i++) {
             var off = i * 4;
-            arr[off] = cols.fillR.get(i);
-            arr[off + 1] = cols.fillG.get(i);
-            arr[off + 2] = cols.fillB.get(i);
-            arr[off + 3] = cols.fillA.get(i);
+            arr[off] = cols.fillR.get(i); arr[off + 1] = cols.fillG.get(i);
+            arr[off + 2] = cols.fillB.get(i); arr[off + 3] = cols.fillA.get(i);
           }
         }
       } else {
-        // Uniform color
         var c = x.fill_color || [116, 172, 144, 255];
         for (var i = 0; i < n; i++) {
           var off = i * 4;
-          arr[off] = c[0];
-          arr[off + 1] = c[1];
-          arr[off + 2] = c[2];
-          arr[off + 3] = c[3] !== undefined ? c[3] : 255;
+          arr[off] = c[0]; arr[off + 1] = c[1];
+          arr[off + 2] = c[2]; arr[off + 3] = (c[3] !== undefined) ? c[3] : 255;
         }
       }
       return arr;
     }
 
-    // Build minimal row array for A5Layer (needs array data for picking)
+    // Minimal row array A5Layer needs for picking (one object per cell).
     function buildPickingArray(cols) {
       var n = cols.length;
       var rows = new Array(n);
-      for (var i = 0; i < n; i++) {
-        rows[i] = { pentagon: cols.pentagons.get(i) };
-      }
+      for (var i = 0; i < n; i++) rows[i] = { pentagon: cols.pentagons.get(i) };
       return rows;
     }
-
-    // Cached arrays — rebuilt only when data changes
-    var cachedFillColorArray = null;
-    var cachedPickingData = null;
-    var cachedDataLength = -1;
-    var dataVersion = 0; // bump on each data swap; used as a stable cache key
 
     function ensureCachedArrays(x) {
       var n = x.data.length;
@@ -553,42 +610,40 @@ HTMLWidgets.widget({
       }
     }
 
-    function invalidateCache() {
-      cachedDataLength = -1;
-      dataVersion++;
-    }
-
+    // Legacy single-layer rendering: one A5Layer over all rows.
+    // Used when aggregate = "none" (no LOD pyramid in the payload).
     function buildA5Layer(x) {
-      var cols = x.data;
+      if (!x.data) return null;
       ensureCachedArrays(x);
-      var fillColorArray = cachedFillColorArray;
+      var fillArr = cachedFillColorArray;
       var pickingData = cachedPickingData;
+      var cols = x.data;
 
-      var layerProps = {
+      var props = {
         id: "a5-layer",
         data: pickingData,
-        getPentagon: function(d) { return d.pentagon; },
-        getFillColor: function(d, info) {
+        getPentagon: function (d) { return d.pentagon; },
+        getFillColor: function (_d, info) {
           var off = info.index * 4;
-          return [fillColorArray[off], fillColorArray[off + 1], fillColorArray[off + 2], fillColorArray[off + 3]];
+          return [fillArr[off], fillArr[off + 1], fillArr[off + 2], fillArr[off + 3]];
         },
         opacity: currentOpacity,
         extruded: x.extruded,
         elevationScale: x.elevation_scale,
-        // While drawing, A5Layer must not claim picks — clicks are vertices.
         pickable: x.pickable && !drawMode,
         autoHighlight: false,
-        onHover: function(info) {
+        onHover: function (info) {
           var newHover = (info && info.object) ? info.object.pentagon : null;
           if (newHover !== hoveredPentagon) {
             hoveredPentagon = newHover;
             scheduleRedraw();
             if (typeof Shiny !== "undefined" && Shiny.setInputValue) {
-              Shiny.setInputValue(el.id + "_hover", pentToHex(newHover), {priority: "event"});
+              Shiny.setInputValue(el.id + "_hover", pentToHex(newHover),
+                { priority: "event" });
             }
           }
         },
-        onClick: function(info) {
+        onClick: function (info) {
           if (info && info.object) {
             var id = info.object.pentagon;
             clickedPentagon = (clickedPentagon === id) ? null : id;
@@ -596,7 +651,8 @@ HTMLWidgets.widget({
               deckgl.setProps({ layers: buildLayers(lastPayload) });
             }
             if (typeof Shiny !== "undefined" && Shiny.setInputValue) {
-              Shiny.setInputValue(el.id + "_click", pentToHex(clickedPentagon), {priority: "event"});
+              Shiny.setInputValue(el.id + "_click", pentToHex(clickedPentagon),
+                { priority: "event" });
             }
           }
         },
@@ -605,30 +661,52 @@ HTMLWidgets.widget({
         getLineWidth: x.line_width || 1,
         lineWidthUnits: "pixels",
         updateTriggers: {
-          getFillColor: [x.fill_is_column, x.fill_color, x.fill_per_cell, pickingData.length]
+          getFillColor: [x.fill_is_column, x.fill_color, x.fill_per_cell, dataVersion]
         }
       };
-
       if (x.extruded && cols.elevation) {
-        layerProps.getElevation = function(d, info) {
-          return (cols.elevation && info.index >= 0) ? (cols.elevation.get(info.index) || 0) : 0;
+        props.getElevation = function (_d, info) {
+          return (info.index >= 0) ? (cols.elevation.get(info.index) || 0) : 0;
         };
       }
-
       if (currentGlobe) {
-        // Skip depth-testing so A5 polygons don't z-fight the basemap
-        // tiles on the sphere surface, and cull the back hemisphere by
-        // face direction instead. On a globe viewed from outside, far-
-        // side polygons face away from the camera, so back-face culling
-        // hides them cleanly.
-        layerProps.parameters = {
-          depthCompare: "always",
-          cullMode: "back"
-        };
+        props.parameters = { depthCompare: "always", cullMode: "back" };
       }
-
-      return new deck.A5Layer(layerProps);
+      return new deck.A5Layer(props);
     }
+
+    // LOD-picker renderer. All tunable knobs (ZOOM_TO_RES,
+    // VIEWPORT_BUFFER, REBUILD_THROTTLE_MS, ...) live in
+    // inst/htmlwidgets/lib/a5view-tiling/tiling.js. This factory
+    // captures the widget-state hooks the renderer needs.
+    var lodRenderer = window.A5View.tiling.createRenderer({
+      getDataVersion: function () { return dataVersion; },
+      getElId: function () { return el.id; },
+      getOpacity: function () { return currentOpacity; },
+      getGlobe: function () { return currentGlobe; },
+      getDrawMode: function () { return drawMode; },
+      getPickable: function (x) { return x.pickable && !drawMode; },
+      onHover: function (pentagon) {
+        if (pentagon !== hoveredPentagon) {
+          hoveredPentagon = pentagon;
+          scheduleRedraw();
+          if (typeof Shiny !== "undefined" && Shiny.setInputValue) {
+            Shiny.setInputValue(el.id + "_hover", pentToHex(pentagon),
+              { priority: "event" });
+          }
+        }
+      },
+      onClick: function (pentagon) {
+        clickedPentagon = (clickedPentagon === pentagon) ? null : pentagon;
+        if (deckgl && lastPayload) {
+          deckgl.setProps({ layers: buildLayers(lastPayload) });
+        }
+        if (typeof Shiny !== "undefined" && Shiny.setInputValue) {
+          Shiny.setInputValue(el.id + "_click", pentToHex(clickedPentagon),
+            { priority: "event" });
+        }
+      }
+    });
 
     function buildHighlightLayer() {
       var target = clickedPentagon || hoveredPentagon;
@@ -712,24 +790,41 @@ HTMLWidgets.widget({
       return layers;
     }
 
-    function getStableLayers(x) {
-      // Reuse the (possibly heavy) tile + A5 + click-highlight layer
-      // instances unless one of their actual inputs has changed. Cursor
-      // movement alone never busts this cache.
-      var key = currentBasemap + "|" + currentOpacity + "|" + currentGlobe
-        + "|" + drawMode + "|" + (hoveredPentagon || "") + "|"
-        + (clickedPentagon || "") + "|" + dataVersion;
-      if (key === stableLayersKey && stableLayersCache) {
-        return stableLayersCache;
+    // Pull the active deck.gl viewport, or synthesise a minimal one
+    // from view state when deck.gl hasn't initialised yet (first
+    // render). The returned object exposes whatever properties our
+    // helpers need (zoom, latitude, optionally getBounds()).
+    function getCurrentViewport() {
+      if (deckgl && deckgl.viewManager) {
+        var vps = deckgl.viewManager.getViewports();
+        if (vps && vps.length > 0) return vps[0];
       }
+      var vs = currentViewState || (lastPayload && lastPayload.view_state) || {};
+      return {
+        zoom: vs.zoom || 0,
+        latitude: vs.latitude || 0,
+        longitude: vs.longitude || 0
+        // No getBounds — getViewportBbox falls back to whole-world.
+      };
+    }
+
+    function getStableLayers(x) {
       var layers = [];
       var tileLayer = makeTileLayer(currentBasemap);
       if (tileLayer) layers.push(tileLayer);
-      layers.push(buildA5Layer(x));
-      var highlight = buildHighlightLayer();
-      if (highlight) layers.push(highlight);
-      stableLayersKey = key;
-      stableLayersCache = layers;
+      // Pyramid mode: render through the LOD picker (and tile layer
+      // above 50k cells per LOD). Otherwise fall back to a single
+      // A5Layer over all rows — the legacy path.
+      if (x.lod_resolutions && x.lod_resolutions.length > 0) {
+        var viewport = getCurrentViewport();
+        var lod = lodRenderer.buildLodLayer(x, viewport);
+        if (lod) layers.push(lod);
+      } else {
+        var a5l = buildA5Layer(x);
+        if (a5l) layers.push(a5l);
+      }
+      var hl = buildHighlightLayer();
+      if (hl) layers.push(hl);
       return layers;
     }
 
@@ -755,6 +850,7 @@ HTMLWidgets.widget({
       return {
         length: table.numRows,
         pentagons: table.getChild("pentagon"),
+        lods: table.getChild("_lod"),
         fillValues: table.getChild("_fill_value"),
         fillR: table.getChild("_fill_r"),
         fillG: table.getChild("_fill_g"),
@@ -764,13 +860,42 @@ HTMLWidgets.widget({
       };
     }
 
+    // The LOD renderer needs the a5-js bridge resolved so it can call
+    // cellToBoundary. No-op once loaded.
+    function ensureA5Prep() {
+      if (window.A5) return Promise.resolve();
+      return window.A5View.tiling.ensureA5();
+    }
+
     var widgetObj = {
       renderValue: function(x) {
-        if (x.arrow_ipc && typeof Arrow !== "undefined") {
-          x.data = decodeArrowData(x.arrow_ipc);
-        }
         invalidateCache();
+        // First paint: deck.gl + basemap immediately. Layer builders
+        // bail with null while x.data is undefined so this is fast and
+        // unblocks the canvas from any synchronous decode + a5-js load.
         renderDeck(x);
+
+        // Defer the heavy lifting one frame so the basemap paints
+        // before we tie up the main thread. setTimeout(0) yields to
+        // the browser; sufficient for first paint to flush.
+        setTimeout(function () {
+          if (x.arrow_ipc && typeof Arrow !== "undefined") {
+            x.data = decodeArrowData(x.arrow_ipc);
+            invalidateCache();
+          }
+          if (deckgl && lastPayload) {
+            deckgl.setProps({ layers: buildLayers(lastPayload) });
+          }
+          // Rebuild once a5-js is ready (cellToBoundary becomes
+          // available); the first build returned null for the LOD layer.
+          ensureA5Prep().then(function () {
+            if (deckgl && lastPayload) {
+              deckgl.setProps({ layers: buildLayers(lastPayload) });
+            }
+          }).catch(function (e) {
+            console.error("[a5view] a5-js prep failed:", e);
+          });
+        }, 0);
       },
 
       resize: function(width, height) {}
@@ -792,6 +917,8 @@ HTMLWidgets.widget({
         if (msg.palette !== undefined) lastPayload.palette = msg.palette;
         if (msg.domain !== undefined) lastPayload.domain = msg.domain;
         if (msg.has_fill_value !== undefined) lastPayload.has_fill_value = msg.has_fill_value;
+        if (msg.data_resolution !== undefined) lastPayload.data_resolution = msg.data_resolution;
+        if (msg.lod_resolutions !== undefined) lastPayload.lod_resolutions = msg.lod_resolutions;
         if (msg.tooltip !== undefined) {
           lastPayload.tooltip = msg.tooltip;
           lastPayload.pickable = true;
@@ -872,6 +999,14 @@ HTMLWidgets.widget({
             getTooltip: tooltipFn,
             onViewStateChange: function(e) {
               currentViewState = e.viewState;
+              updateDebugLabel(e.viewState);
+              // The LOD layer is viewport-driven; the legacy A5Layer
+              // path renders all data and doesn't need viewport
+              // rebuilds. Gate accordingly.
+              if (lastPayload && lastPayload.lod_resolutions &&
+                  lastPayload.lod_resolutions.length > 0) {
+                scheduleRebuild();
+              }
             },
             onHover: function(info) {
               if (drawMode && info && info.coordinate) {
@@ -934,6 +1069,7 @@ HTMLWidgets.widget({
         }
 
         buildControls(basemaps, el);
+        updateDebugLabel(currentViewState || x.view_state);
 
         // Keep cursor styling consistent when controls are rebuilt
         if (drawMode) el.style.cursor = "crosshair";

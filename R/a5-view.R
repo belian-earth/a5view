@@ -62,6 +62,27 @@
 #'   inside the polygon — resolve the WKT server-side (e.g. with
 #'   [a5R::a5_grid()]) and update the map fills via [a5_view_update()].
 #'   Only useful in a Shiny context. Default: `FALSE`.
+#' @param aggregate How parent cells are summarised when zooming out.
+#'   One of:
+#'   - `"none"` (default): no precomputed pyramid. Cells render through
+#'     the standard deck.gl `A5Layer`. Cheapest to build, suitable for
+#'     small to medium datasets where you don't need LOD switching.
+#'   - `"rep_child"`: each parent inherits the row of the child whose
+#'     payload (RGBA + optional `fill_value`/`elevation`) is closest in
+#'     Euclidean distance to its parent's mean. Preserves real values,
+#'     no blending. Use for embedding/RGB visualisations.
+#'   - `"mean"`: each numeric payload column is averaged independently
+#'     within the parent group. Best for scalar fields; blends colours
+#'     in RGB space, which can mute embedding visualisations.
+#'   When set to `"rep_child"` or `"mean"`, leaf rows render as-is at
+#'   high zoom and aggregated parent rows render at coarser LODs. Above
+#'   50k rows per LOD, rendering routes through deck.gl's `TileLayer`
+#'   for stable per-tile GPU caching.
+#' @param lod_step Integer >= 1, gap between successive precomputed
+#'   LODs (only used when `aggregate != "none"`). `1` (default)
+#'   precomputes every level from the data resolution down to the
+#'   floor (LOD 2); larger values trade size for fewer levels and more
+#'   visible popping at zoom transitions.
 #' @returns An htmlwidget.
 #'
 #' @export
@@ -83,8 +104,11 @@ a5_view <- function(
   zoom = NULL,
   globe = FALSE,
   basemap = c("dark", "light", "osm", "satellite"),
-  draw_polygon = FALSE
+  draw_polygon = FALSE,
+  aggregate = c("none", "rep_child", "mean"),
+  lod_step = 1L
 ) {
+  aggregate <- match.arg(aggregate)
   # --- Validate all arguments ---
   check_cells(cells)
   check_number_decimal(opacity, min = 0, max = 1, arg = "opacity")
@@ -106,6 +130,11 @@ a5_view <- function(
   if (!rlang::is_bool(fill_identity)) {
     cli::cli_abort("{.arg fill_identity} must be {.val TRUE} or {.val FALSE}.")
   }
+  if (!rlang::is_integerish(lod_step, n = 1L) ||
+      is.na(lod_step) || lod_step < 1L) {
+    cli::cli_abort("{.arg lod_step} must be a positive integer.")
+  }
+  lod_step <- as.integer(lod_step)
 
   # --- Resolve fill and elevation (NSE) ---
   fill_quo <- rlang::enquo(fill)
@@ -167,7 +196,7 @@ a5_view <- function(
 
   # --- Attach fill, elevation, tooltip data ---
   fill_payload <- attach_fill(df, fill_resolved, prepared, palette)
-  df <- fill_payload$df
+  df <- normalize_rgba_cols(fill_payload$df)
 
   extruded <- !is.null(elev_col)
   if (extruded) {
@@ -182,33 +211,49 @@ a5_view <- function(
 
   pickable <- !isFALSE(tooltip)
   has_fill_value <- "_fill_value" %in% names(df)
+  has_rgba_cols <- "_fill_r" %in% names(df)
 
   # --- Auto-center view ---
   view_state <- auto_view(df[["pentagon"]], lng, lat, zoom)
 
-  # --- Build Arrow IPC as base64 for inline transfer ---
-  arrow_cols <- list(pentagon = a5R::a5_cell_to_arrow(prepared$a5_cells))
-  if (has_fill_value) {
-    arrow_cols[["_fill_value"]] <- df[["_fill_value"]]
+  data_resolution <- as.integer(a5R::a5_get_resolution(prepared$a5_cells[[1]]))
+
+  if (aggregate == "none") {
+    # Legacy path: leaf-only payload, rendered as a single A5Layer.
+    pdf <- df
+    lod_resolutions <- NULL
+    arrow_cells <- prepared$a5_cells
+  } else {
+    pyramid <- build_a5_pyramid(
+      leaf_cells = prepared$a5_cells,
+      df = df,
+      data_resolution = data_resolution,
+      lod_step = lod_step,
+      aggregate = aggregate
+    )
+    pdf <- pyramid$data
+    lod_resolutions <- as.list(as.integer(pyramid$lod_resolutions))
+    arrow_cells <- pyramid$cells
   }
-  has_rgba_cols <- "_fill_r" %in% names(df)
-  has_per_cell_rgba <- "_fill_rgba" %in% names(df)
+
+  # --- Build Arrow IPC as base64 for inline transfer ---
+  arrow_cols <- list(pentagon = a5R::a5_cell_to_arrow(arrow_cells))
+  if (aggregate != "none") {
+    arrow_cols[["_lod"]] <- arrow::Array$create(pdf[["_lod"]], type = arrow::uint8())
+  }
+  if (has_fill_value) {
+    arrow_cols[["_fill_value"]] <- pdf[["_fill_value"]]
+  }
   if (has_rgba_cols) {
-    # Pre-computed RGBA as uint8 (0-255 fits in 1 byte, not 4)
-    arrow_cols[["_fill_r"]] <- arrow::Array$create(df[["_fill_r"]], type = arrow::uint8())
-    arrow_cols[["_fill_g"]] <- arrow::Array$create(df[["_fill_g"]], type = arrow::uint8())
-    arrow_cols[["_fill_b"]] <- arrow::Array$create(df[["_fill_b"]], type = arrow::uint8())
-    arrow_cols[["_fill_a"]] <- arrow::Array$create(df[["_fill_a"]], type = arrow::uint8())
-  } else if (has_per_cell_rgba) {
-    rgba_mat <- do.call(rbind, df[["_fill_rgba"]])
-    arrow_cols[["_fill_r"]] <- arrow::Array$create(as.integer(rgba_mat[, 1]), type = arrow::uint8())
-    arrow_cols[["_fill_g"]] <- arrow::Array$create(as.integer(rgba_mat[, 2]), type = arrow::uint8())
-    arrow_cols[["_fill_b"]] <- arrow::Array$create(as.integer(rgba_mat[, 3]), type = arrow::uint8())
-    arrow_cols[["_fill_a"]] <- arrow::Array$create(as.integer(rgba_mat[, 4]), type = arrow::uint8())
+    arrow_cols[["_fill_r"]] <- arrow::Array$create(pdf[["_fill_r"]], type = arrow::uint8())
+    arrow_cols[["_fill_g"]] <- arrow::Array$create(pdf[["_fill_g"]], type = arrow::uint8())
+    arrow_cols[["_fill_b"]] <- arrow::Array$create(pdf[["_fill_b"]], type = arrow::uint8())
+    arrow_cols[["_fill_a"]] <- arrow::Array$create(pdf[["_fill_a"]], type = arrow::uint8())
   }
   if (extruded) {
-    arrow_cols[["_elevation"]] <- df[["_elevation"]]
+    arrow_cols[["_elevation"]] <- pdf[["_elevation"]]
   }
+
   arrow_tbl <- do.call(arrow::arrow_table, arrow_cols)
   ipc_raw <- arrow::write_to_raw(arrow_tbl, format = "stream")
   arrow_b64 <- base64enc::base64encode(ipc_raw)
@@ -218,7 +263,7 @@ a5_view <- function(
     arrow_ipc = arrow_b64,
     fill_is_column = fill_payload$fill_is_column,
     fill_color = fill_payload$fill_color,
-    fill_per_cell = has_rgba_cols || has_per_cell_rgba,
+    fill_per_cell = has_rgba_cols,
     palette = fill_payload$js_palette,
     domain = fill_payload$domain,
     opacity = opacity,
@@ -233,7 +278,9 @@ a5_view <- function(
     view_state = view_state,
     globe = globe,
     basemaps = as.list(basemap),
-    draw_polygon = draw_polygon
+    draw_polygon = draw_polygon,
+    data_resolution = data_resolution,
+    lod_resolutions = lod_resolutions
   )
 
   widget <- htmlwidgets::createWidget(
@@ -304,9 +351,17 @@ a5_view_update <- function(
   cells,
   fill = "#74ac90ff",
   palette = "Viridis",
-  tooltip = TRUE
+  tooltip = TRUE,
+  aggregate = c("none", "rep_child", "mean"),
+  lod_step = 1L
 ) {
   check_cells(cells)
+  aggregate <- match.arg(aggregate)
+  if (!rlang::is_integerish(lod_step, n = 1L) ||
+      is.na(lod_step) || lod_step < 1L) {
+    cli::cli_abort("{.arg lod_step} must be a positive integer.")
+  }
+  lod_step <- as.integer(lod_step)
 
   fill_quo <- rlang::enquo(fill)
   fill_expr <- rlang::quo_get_expr(fill_quo)
@@ -331,27 +386,41 @@ a5_view_update <- function(
   if (nrow(df) == 0L) return(invisible(NULL))
 
   fill_payload <- attach_fill(df, fill_resolved, prepared, palette)
-  df <- fill_payload$df
+  df <- normalize_rgba_cols(fill_payload$df)
   has_fill_value <- "_fill_value" %in% names(df)
   has_rgba_cols <- "_fill_r" %in% names(df)
-  has_per_cell_rgba <- "_fill_rgba" %in% names(df)
 
-  # Build Arrow IPC
-  arrow_cols <- list(pentagon = a5R::a5_cell_to_arrow(prepared$a5_cells))
+  data_resolution <- as.integer(a5R::a5_get_resolution(prepared$a5_cells[[1]]))
+
+  if (aggregate == "none") {
+    pdf <- df
+    lod_resolutions <- NULL
+    arrow_cells <- prepared$a5_cells
+  } else {
+    pyramid <- build_a5_pyramid(
+      leaf_cells = prepared$a5_cells,
+      df = df,
+      data_resolution = data_resolution,
+      lod_step = lod_step,
+      aggregate = aggregate
+    )
+    pdf <- pyramid$data
+    lod_resolutions <- as.list(as.integer(pyramid$lod_resolutions))
+    arrow_cells <- pyramid$cells
+  }
+
+  arrow_cols <- list(pentagon = a5R::a5_cell_to_arrow(arrow_cells))
+  if (aggregate != "none") {
+    arrow_cols[["_lod"]] <- arrow::Array$create(pdf[["_lod"]], type = arrow::uint8())
+  }
   if (has_fill_value) {
-    arrow_cols[["_fill_value"]] <- df[["_fill_value"]]
+    arrow_cols[["_fill_value"]] <- pdf[["_fill_value"]]
   }
   if (has_rgba_cols) {
-    arrow_cols[["_fill_r"]] <- arrow::Array$create(df[["_fill_r"]], type = arrow::uint8())
-    arrow_cols[["_fill_g"]] <- arrow::Array$create(df[["_fill_g"]], type = arrow::uint8())
-    arrow_cols[["_fill_b"]] <- arrow::Array$create(df[["_fill_b"]], type = arrow::uint8())
-    arrow_cols[["_fill_a"]] <- arrow::Array$create(df[["_fill_a"]], type = arrow::uint8())
-  } else if (has_per_cell_rgba) {
-    rgba_mat <- do.call(rbind, df[["_fill_rgba"]])
-    arrow_cols[["_fill_r"]] <- arrow::Array$create(as.integer(rgba_mat[, 1]), type = arrow::uint8())
-    arrow_cols[["_fill_g"]] <- arrow::Array$create(as.integer(rgba_mat[, 2]), type = arrow::uint8())
-    arrow_cols[["_fill_b"]] <- arrow::Array$create(as.integer(rgba_mat[, 3]), type = arrow::uint8())
-    arrow_cols[["_fill_a"]] <- arrow::Array$create(as.integer(rgba_mat[, 4]), type = arrow::uint8())
+    arrow_cols[["_fill_r"]] <- arrow::Array$create(pdf[["_fill_r"]], type = arrow::uint8())
+    arrow_cols[["_fill_g"]] <- arrow::Array$create(pdf[["_fill_g"]], type = arrow::uint8())
+    arrow_cols[["_fill_b"]] <- arrow::Array$create(pdf[["_fill_b"]], type = arrow::uint8())
+    arrow_cols[["_fill_a"]] <- arrow::Array$create(pdf[["_fill_a"]], type = arrow::uint8())
   }
   arrow_tbl <- do.call(arrow::arrow_table, arrow_cols)
   ipc_raw <- arrow::write_to_raw(arrow_tbl, format = "stream")
@@ -361,11 +430,13 @@ a5_view_update <- function(
     arrow_ipc = arrow_b64,
     fill_is_column = fill_payload$fill_is_column,
     fill_color = fill_payload$fill_color,
-    fill_per_cell = has_rgba_cols || has_per_cell_rgba,
+    fill_per_cell = has_rgba_cols,
     palette = fill_payload$js_palette,
     domain = fill_payload$domain,
     has_fill_value = has_fill_value,
-    tooltip = !isFALSE(tooltip)
+    tooltip = !isFALSE(tooltip),
+    data_resolution = data_resolution,
+    lod_resolutions = lod_resolutions
   )
 
   session$sendCustomMessage(paste0("a5view-update-", outputId), msg)

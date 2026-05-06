@@ -11,3 +11,15 @@ dependencies:
       href: https://unpkg.com/@deck.gl/geo-layers@^9.2.0
     script:
       - dist.min.js
+  - name: a5-js
+    version: 0.7.3
+    src:
+      file: htmlwidgets/lib/a5-js
+    script:
+      - bridge.js
+  - name: a5view-tiling
+    version: 0.1.0
+    src:
+      file: htmlwidgets/lib/a5view-tiling
+    script:
+      - tiling.js
