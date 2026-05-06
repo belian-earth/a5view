@@ -11,11 +11,19 @@
 #'   - A character vector of hex colours (same length as cells) for
 #'     per-cell colours.
 #'   - An unquoted column name when `cells` is a data frame.
+#'   - An expression evaluated against the columns of `cells`, in the
+#'     style of `ggplot2::aes()`. This makes the colour helpers
+#'     [cells_rgb()] and [cells_pca_rgb()] usable directly inside the
+#'     call, e.g. `a5_view(df, fill = cells_rgb(r, g, b))` or
+#'     `a5_view(df, fill = cells_pca_rgb(embedding))`. The helpers tag
+#'     their output so `fill_identity` is auto-enabled.
 #'   Default: `"#3388ff"`.
 #' @param fill_identity Logical. When `TRUE`, treat `fill` values as
 #'   literal colours rather than mapping through `palette`. Accepts
 #'   packed RGB integers (`(R << 16) | (G << 8) | B`) or hex colour
-#'   strings. Default: `FALSE`.
+#'   strings. Auto-enabled when `fill` is produced by [cells_rgb()] /
+#'   [cells_pca_rgb()] or any vector tagged with
+#'   `attr(x, "a5_identity") <- TRUE`. Default: `FALSE`.
 #' @param palette Colour palette used when `fill` is numeric. Either a
 #'   palette name accepted by [grDevices::hcl.colors()] (e.g.
 #'   `"viridis"`, `"inferno"`, `"plasma"`, `"turbo"`, `"rocket"`) or
@@ -100,11 +108,26 @@ a5_view <- function(
   }
 
   # --- Resolve fill and elevation (NSE) ---
-  fill_expr <- substitute(fill)
+  fill_quo <- rlang::enquo(fill)
+  fill_expr <- rlang::quo_get_expr(fill_quo)
   elev_expr <- substitute(elevation)
+
+  # aes()-style: when fill is a call and cells is a data frame, evaluate
+  # the call against the columns of cells as a data mask. Bare names and
+  # literal vectors fall through to the existing resolution paths.
+  if (is.call(fill_expr) && is.data.frame(cells)) {
+    fill <- rlang::eval_tidy(fill_quo, data = cells)
+  }
 
   n_cells <- if (a5R::is_a5_cell(cells)) length(cells) else nrow(cells)
   fill_resolved <- resolve_fill(cells, fill, fill_expr, n_cells)
+
+  # Auto-flip fill_identity when fill is tagged "a5_identity" — this lets
+  # cells_rgb() / cells_pca_rgb() (and any column tagged the same way)
+  # render as packed RGB without a manual fill_identity = TRUE.
+  if (!fill_identity && has_identity_tag(cells, fill_resolved)) {
+    fill_identity <- TRUE
+  }
 
   # --- Identity fill: convert column/numeric values to literal colours ---
   if (fill_identity) {
@@ -285,9 +308,22 @@ a5_view_update <- function(
 ) {
   check_cells(cells)
 
-  fill_expr <- substitute(fill)
+  fill_quo <- rlang::enquo(fill)
+  fill_expr <- rlang::quo_get_expr(fill_quo)
+  if (is.call(fill_expr) && is.data.frame(cells)) {
+    fill <- rlang::eval_tidy(fill_quo, data = cells)
+  }
   n_cells <- if (a5R::is_a5_cell(cells)) length(cells) else nrow(cells)
   fill_resolved <- resolve_fill(cells, fill, fill_expr, n_cells)
+
+  # Auto-flip identity for tagged outputs (e.g. cells_rgb / cells_pca_rgb).
+  if (has_identity_tag(cells, fill_resolved)) {
+    if (fill_resolved$type == "column") {
+      fill_resolved$identity <- TRUE
+    } else if (fill_resolved$type == "numeric") {
+      fill_resolved$type <- "identity"
+    }
+  }
 
   prepared <- prepare_data(cells)
   df <- prepared$data

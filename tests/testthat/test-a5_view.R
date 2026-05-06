@@ -166,6 +166,90 @@ test_that("fill_identity errors on uniform fill", {
   expect_error(a5_view(cells, fill = "#ff0000", fill_identity = TRUE), "fill_identity")
 })
 
+# --- aes-style NSE fill ---
+
+test_that("a5_view evaluates fill expression against data frame columns", {
+  cells <- make_cells(3)
+  df <- data.frame(
+    cell = cells,
+    r = c(1.0, 0.0, 0.0),
+    g = c(0.0, 1.0, 0.0),
+    b = c(0.0, 0.0, 1.0)
+  )
+  w <- a5_view(df, fill = cells_rgb(r, g, b))
+  expect_true(w$x$fill_per_cell)
+  expect_false(w$x$fill_is_column)
+  tbl <- arrow::read_ipc_stream(base64enc::base64decode(w$x$arrow_ipc))
+  expect_equal(as.integer(tbl[["_fill_r"]]), c(255L, 0L, 0L))
+  expect_equal(as.integer(tbl[["_fill_g"]]), c(0L, 255L, 0L))
+  expect_equal(as.integer(tbl[["_fill_b"]]), c(0L, 0L, 255L))
+})
+
+test_that("a5_view auto-detects fill_identity from cells_rgb attribute", {
+  cells <- make_cells(3)
+  df <- data.frame(
+    cell = cells,
+    r = c(1.0, 0.0, 0.0),
+    g = c(0.0, 1.0, 0.0),
+    b = c(0.0, 0.0, 1.0)
+  )
+  # No fill_identity = TRUE — helper output's a5_identity attr should
+  # auto-flip it.
+  w <- a5_view(df, fill = cells_rgb(r, g, b))
+  tbl <- arrow::read_ipc_stream(base64enc::base64decode(w$x$arrow_ipc))
+  expect_equal(as.integer(tbl[["_fill_r"]]), c(255L, 0L, 0L))
+})
+
+test_that("a5_view auto-flips identity for column tagged a5_identity", {
+  cells <- make_cells(3)
+  rgb_packed <- c(16711680L, 65280L, 255L)  # red, green, blue
+  attr(rgb_packed, "a5_identity") <- TRUE
+  df <- data.frame(cell = cells)
+  df$rgb <- rgb_packed
+  # No fill_identity = TRUE — column attr should auto-flip it.
+  w <- a5_view(df, fill = rgb)
+  tbl <- arrow::read_ipc_stream(base64enc::base64decode(w$x$arrow_ipc))
+  expect_equal(as.integer(tbl[["_fill_r"]]), c(255L, 0L, 0L))
+  expect_equal(as.integer(tbl[["_fill_g"]]), c(0L, 255L, 0L))
+  expect_equal(as.integer(tbl[["_fill_b"]]), c(0L, 0L, 255L))
+})
+
+test_that("a5_view bare column name still palette-maps untagged numeric", {
+  cells <- make_cells(3)
+  df <- data.frame(cell = cells, score = c(1.0, 2.0, 3.0))
+  w <- a5_view(df, fill = score)
+  expect_true(w$x$fill_is_column)
+  expect_equal(w$x$domain, c(1, 3))
+  # palette path produces _fill_value alongside RGBA; identity path does not
+  tbl <- arrow::read_ipc_stream(base64enc::base64decode(w$x$arrow_ipc))
+  expect_true("_fill_value" %in% names(tbl))
+})
+
+test_that("a5_view manual fill_identity still works on plain numeric column", {
+  cells <- make_cells(3)
+  rgb_packed <- c(16711680L, 65280L, 255L)
+  df <- data.frame(cell = cells, rgb = rgb_packed)  # no attr
+  w <- a5_view(df, fill = rgb, fill_identity = TRUE)
+  tbl <- arrow::read_ipc_stream(base64enc::base64decode(w$x$arrow_ipc))
+  expect_equal(as.integer(tbl[["_fill_r"]]), c(255L, 0L, 0L))
+})
+
+test_that("a5_view aes-style fill works inside a wrapper function", {
+  # Confirms the captured quosure's environment is honoured for non-mask
+  # symbols (e.g. the rgb_pcs argument default lookup).
+  inner <- function(df) a5_view(df, fill = cells_rgb(r, g, b))
+  cells <- make_cells(3)
+  df <- data.frame(
+    cell = cells,
+    r = c(1.0, 0.0, 0.0),
+    g = c(0.0, 1.0, 0.0),
+    b = c(0.0, 0.0, 1.0)
+  )
+  w <- inner(df)
+  tbl <- arrow::read_ipc_stream(base64enc::base64decode(w$x$arrow_ipc))
+  expect_equal(as.integer(tbl[["_fill_r"]]), c(255L, 0L, 0L))
+})
+
 # --- Palette ---
 
 test_that("a5_view with custom colour palette pre-computes RGBA", {

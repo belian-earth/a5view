@@ -59,7 +59,9 @@ cells_rgb <- function(r, g, b, range = NULL) {
     bb <- rescale_byte_auto(b)
   }
 
-  bitwOr(bitwOr(bitwShiftL(rb, 16L), bitwShiftL(gb, 8L)), bb)
+  out <- bitwOr(bitwOr(bitwShiftL(rb, 16L), bitwShiftL(gb, 8L)), bb)
+  attr(out, "a5_identity") <- TRUE
+  out
 }
 
 #' Build per-cell RGB colours from the first three principal components
@@ -221,6 +223,21 @@ rescale_byte_auto <- function(x) {
     return(rep(NA_integer_, length(x)))
   }
   rescale_byte(x, min(x, na.rm = TRUE), max(x, na.rm = TRUE))
+}
+
+#' Detect whether a resolved fill carries the `a5_identity` attribute
+#'
+#' Set by [cells_rgb()] / [cells_pca_rgb()] (or any user code) on packed-
+#' integer RGB outputs so [a5_view()] can auto-flip `fill_identity`.
+#' @noRd
+has_identity_tag <- function(cells, fill_resolved) {
+  tagged_value <- switch(
+    fill_resolved$type,
+    "numeric" = fill_resolved$values,
+    "column"  = if (is.data.frame(cells)) cells[[fill_resolved$col]] else NULL,
+    NULL
+  )
+  !is.null(tagged_value) && isTRUE(attr(tagged_value, "a5_identity"))
 }
 
 #' Resolve fill argument into a typed result
