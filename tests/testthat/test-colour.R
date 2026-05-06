@@ -7,30 +7,37 @@ pack_rgb <- function(r, g, b) {
   bitwOr(bitwOr(bitwShiftL(r, 16L), bitwShiftL(g, 8L)), b)
 }
 
+test_that("cells_rgb tags output with a5_identity attribute", {
+  result <- cells_rgb(c(0, 1), c(0, 1), c(0, 1))
+  expect_true(isTRUE(attr(result, "a5_identity")))
+})
+
 test_that("cells_rgb rescales each channel to its own min/max", {
   result <- cells_rgb(c(0, 0.5, 1), c(1, 0.5, 0), c(0, 0.5, 1))
   expect_equal(
     result,
-    pack_rgb(c(0L, 128L, 255L), c(255L, 128L, 0L), c(0L, 128L, 255L))
+    pack_rgb(c(0L, 128L, 255L), c(255L, 128L, 0L), c(0L, 128L, 255L)),
+    ignore_attr = "a5_identity"
   )
 })
 
 test_that("cells_rgb propagates NA when any channel is NA", {
   result <- cells_rgb(c(0, NA, 1), c(0, 0.5, 1), c(0, 1, NA))
-  expect_equal(result, c(0L, NA_integer_, NA_integer_))
+  expect_equal(result, c(0L, NA_integer_, NA_integer_), ignore_attr = "a5_identity")
 })
 
 test_that("cells_rgb maps a constant channel to zero", {
   result <- cells_rgb(c(0.5, 0.5, 0.5), c(0, 0.5, 1), c(1, 0, 0.5))
   expect_equal(
     result,
-    pack_rgb(c(0L, 0L, 0L), c(0L, 128L, 255L), c(255L, 0L, 128L))
+    pack_rgb(c(0L, 0L, 0L), c(0L, 128L, 255L), c(255L, 0L, 128L)),
+    ignore_attr = "a5_identity"
   )
 })
 
 test_that("cells_rgb returns NA for an entirely NA channel under per-channel scaling", {
   result <- cells_rgb(c(NA_real_, NA_real_), c(0, 1), c(0, 1))
-  expect_equal(result, c(NA_integer_, NA_integer_))
+  expect_equal(result, c(NA_integer_, NA_integer_), ignore_attr = "a5_identity")
 })
 
 test_that("cells_rgb applies and clips a shared range", {
@@ -42,7 +49,8 @@ test_that("cells_rgb applies and clips a shared range", {
   )
   expect_equal(
     result,
-    pack_rgb(c(0L, 0L, 255L, 255L), c(0L, 128L, 255L, 255L), c(0L, 0L, 255L, 255L))
+    pack_rgb(c(0L, 0L, 255L, 255L), c(0L, 128L, 255L, 255L), c(0L, 0L, 255L, 255L)),
+    ignore_attr = "a5_identity"
   )
 })
 

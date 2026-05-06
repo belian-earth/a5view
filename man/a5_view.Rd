@@ -36,13 +36,21 @@ containing an \code{a5_cell} column.}
 \item A character vector of hex colours (same length as cells) for
 per-cell colours.
 \item An unquoted column name when \code{cells} is a data frame.
+\item An expression evaluated against the columns of \code{cells}, in the
+style of \code{ggplot2::aes()}. This makes the colour helpers
+\code{\link[=cells_rgb]{cells_rgb()}} and \code{\link[=cells_pca_rgb]{cells_pca_rgb()}} usable directly inside the
+call, e.g. \code{a5_view(df, fill = cells_rgb(r, g, b))} or
+\code{a5_view(df, fill = cells_pca_rgb(embedding))}. The helpers tag
+their output so \code{fill_identity} is auto-enabled.
 Default: \code{"#3388ff"}.
 }}
 
 \item{fill_identity}{Logical. When \code{TRUE}, treat \code{fill} values as
 literal colours rather than mapping through \code{palette}. Accepts
 packed RGB integers (\verb{(R << 16) | (G << 8) | B}) or hex colour
-strings. Default: \code{FALSE}.}
+strings. Auto-enabled when \code{fill} is produced by \code{\link[=cells_rgb]{cells_rgb()}} /
+\code{\link[=cells_pca_rgb]{cells_pca_rgb()}} or any vector tagged with
+\code{attr(x, "a5_identity") <- TRUE}. Default: \code{FALSE}.}
 
 \item{palette}{Colour palette used when \code{fill} is numeric. Either a
 palette name accepted by \code{\link[grDevices:palettes]{grDevices::hcl.colors()}} (e.g.
