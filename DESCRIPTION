@@ -27,6 +27,5 @@ Suggests:
     irlba,
     testthat (>= 3.0.0)
 Remotes:
-    belian-earth/a5R,
     r-spatial/geoarrowWidget
 Config/testthat/edition: 3
