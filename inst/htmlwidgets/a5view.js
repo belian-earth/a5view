@@ -675,11 +675,8 @@ HTMLWidgets.widget({
       return new deck.A5Layer(props);
     }
 
-    // LOD-picker renderer. All tunable knobs (ZOOM_TO_RES,
-    // VIEWPORT_BUFFER, REBUILD_THROTTLE_MS, ...) live in
-    // inst/htmlwidgets/lib/a5view-tiling/tiling.js. This factory
-    // captures the widget-state hooks the renderer needs.
-    var lodRenderer = window.A5View.tiling.createRenderer({
+    // Shared widget-state hooks both renderers consume.
+    var rendererCtx = {
       getDataVersion: function () { return dataVersion; },
       getElId: function () { return el.id; },
       getOpacity: function () { return currentOpacity; },
@@ -705,8 +702,19 @@ HTMLWidgets.widget({
           Shiny.setInputValue(el.id + "_click", pentToHex(clickedPentagon),
             { priority: "event" });
         }
-      }
-    });
+      },
+      // Called by the lazy renderer when a row-group decode lands.
+      onDataReady: function () { scheduleRebuild(); }
+    };
+
+    // LOD-picker renderer (in-memory Arrow IPC path). All tunable knobs
+    // (ZOOM_TO_RES, VIEWPORT_BUFFER, REBUILD_THROTTLE_MS, ...) live in
+    // inst/htmlwidgets/lib/a5view-tiling/tiling.js.
+    var lodRenderer = window.A5View.tiling.createRenderer(rendererCtx);
+
+    // Lazy renderer (parquet + hyparquet path). Decodes row groups on
+    // demand, scheduling rebuilds as new data lands.
+    var lazyRenderer = window.A5View.lazy.createRenderer(rendererCtx);
 
     function buildHighlightLayer() {
       var target = clickedPentagon || hoveredPentagon;
@@ -812,13 +820,20 @@ HTMLWidgets.widget({
       var layers = [];
       var tileLayer = makeTileLayer(currentBasemap);
       if (tileLayer) layers.push(tileLayer);
-      // Pyramid mode: render through the LOD picker (and tile layer
-      // above 50k cells per LOD). Otherwise fall back to a single
-      // A5Layer over all rows — the legacy path.
-      if (x.lod_resolutions && x.lod_resolutions.length > 0) {
-        var viewport = getCurrentViewport();
-        var lod = lodRenderer.buildLodLayer(x, viewport);
-        if (lod) layers.push(lod);
+      // Two render paths:
+      //   1. Lazy parquet (x.parquet_b64): TileLayer + per-tile A5Layer,
+      //      hyparquet-backed row-group decode on demand.
+      //   2. Legacy single A5Layer: aggregate = "none", no LOD pyramid.
+      if (x.parquet_b64) {
+        // The lazy tiled path returns an array of per-tile A5Layers
+        // (so deck.gl reconciles each tile by stable id and we get
+        // per-tile GPU caching). The flat path returns a single layer.
+        var lz = lazyRenderer.buildLodLayer(x, getCurrentViewport());
+        if (Array.isArray(lz)) {
+          for (var i = 0; i < lz.length; i++) layers.push(lz[i]);
+        } else if (lz) {
+          layers.push(lz);
+        }
       } else {
         var a5l = buildA5Layer(x);
         if (a5l) layers.push(a5l);
@@ -871,15 +886,28 @@ HTMLWidgets.widget({
       renderValue: function(x) {
         invalidateCache();
         // First paint: deck.gl + basemap immediately. Layer builders
-        // bail with null while x.data is undefined so this is fast and
-        // unblocks the canvas from any synchronous decode + a5-js load.
+        // bail with null while data isn't ready, so this unblocks the
+        // canvas from any synchronous decode + a5-js load.
         renderDeck(x);
 
         // Defer the heavy lifting one frame so the basemap paints
-        // before we tie up the main thread. setTimeout(0) yields to
-        // the browser; sufficient for first paint to flush.
+        // before we tie up the main thread.
         setTimeout(function () {
-          if (x.arrow_ipc && typeof Arrow !== "undefined") {
+          console.log("[a5view] renderValue dispatch: parquet_b64=" +
+                      !!x.parquet_b64 + " arrow_ipc=" + !!x.arrow_ipc +
+                      " lazy.exists=" + !!(window.A5View && window.A5View.lazy));
+          if (x.parquet_b64) {
+            // Lazy path: parse parquet metadata only. Row groups are
+            // decoded later on demand, with rebuilds triggered by
+            // ctx.onDataReady().
+            lazyRenderer.init(x.parquet_b64).then(function () {
+              if (deckgl && lastPayload) {
+                deckgl.setProps({ layers: buildLayers(lastPayload) });
+              }
+            }).catch(function (e) {
+              console.error("[a5view] lazy init failed:", e);
+            });
+          } else if (x.arrow_ipc && typeof Arrow !== "undefined") {
             x.data = decodeArrowData(x.arrow_ipc);
             invalidateCache();
           }
@@ -924,7 +952,21 @@ HTMLWidgets.widget({
           lastPayload.pickable = true;
         }
 
-        if (msg.arrow_ipc && typeof Arrow !== "undefined") {
+        if (msg.parquet_b64) {
+          lastPayload.parquet_b64 = msg.parquet_b64;
+          lastPayload.parquet_row_groups = msg.parquet_row_groups;
+          lastPayload.arrow_ipc = null;
+          lastPayload.data = null;
+          invalidateCache();
+          lazyRenderer.init(msg.parquet_b64).then(function () {
+            if (deckgl && lastPayload) {
+              deckgl.setProps({ layers: buildLayers(lastPayload) });
+            }
+          }).catch(function (e) {
+            console.error("[a5view] lazy update init failed:", e);
+          });
+        } else if (msg.arrow_ipc && typeof Arrow !== "undefined") {
+          lastPayload.parquet_b64 = null;
           lastPayload.data = decodeArrowData(msg.arrow_ipc);
           invalidateCache();
         }
@@ -1000,11 +1042,10 @@ HTMLWidgets.widget({
             onViewStateChange: function(e) {
               currentViewState = e.viewState;
               updateDebugLabel(e.viewState);
-              // The LOD layer is viewport-driven; the legacy A5Layer
-              // path renders all data and doesn't need viewport
-              // rebuilds. Gate accordingly.
-              if (lastPayload && lastPayload.lod_resolutions &&
-                  lastPayload.lod_resolutions.length > 0) {
+              // The lazy path is viewport-driven via TileLayer + the
+              // row-group decode-on-demand renderer; the legacy A5Layer
+              // path renders all rows so doesn't need viewport rebuilds.
+              if (lastPayload && lastPayload.parquet_b64) {
                 scheduleRebuild();
               }
             },

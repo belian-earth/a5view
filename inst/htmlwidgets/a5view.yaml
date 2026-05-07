@@ -17,9 +17,16 @@ dependencies:
       file: htmlwidgets/lib/a5-js
     script:
       - bridge.js
+  - name: hyparquet
+    version: 1.25.6
+    src:
+      file: htmlwidgets/lib/hyparquet
+    script:
+      - hyparquet-bootstrap.js
   - name: a5view-tiling
     version: 0.1.0
     src:
       file: htmlwidgets/lib/a5view-tiling
     script:
       - tiling.js
+      - lazy-renderer.js

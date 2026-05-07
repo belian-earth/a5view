@@ -22,7 +22,9 @@ Imports:
     geoarrowWidget,
     grDevices,
     htmlwidgets,
-    rlang (>= 1.0.0)
+    rlang (>= 1.0.0),
+    wk,
+    yyjsonr
 Suggests:
     irlba,
     testthat (>= 3.0.0)

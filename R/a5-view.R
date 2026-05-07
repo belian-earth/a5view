@@ -255,12 +255,29 @@ a5_view <- function(
   }
 
   arrow_tbl <- do.call(arrow::arrow_table, arrow_cols)
-  ipc_raw <- arrow::write_to_raw(arrow_tbl, format = "stream")
-  arrow_b64 <- base64enc::base64encode(ipc_raw)
+
+  parquet_payload <- NULL
+  if (aggregate != "none") {
+    # Pyramid path: always parquet + JS-side lazy row-group decode.
+    # Smaller initial payload, viewport-driven decoding, per-tile GPU
+    # caching via the lazy renderer's TileLayer.
+    parquet_payload <- serialise_pyramid_to_parquet(
+      pdf, arrow_cells,
+      has_fill_value = has_fill_value,
+      has_rgba_cols = has_rgba_cols,
+      extruded = extruded
+    )
+    arrow_b64 <- NULL
+  } else {
+    ipc_raw <- arrow::write_to_raw(arrow_tbl, format = "stream")
+    arrow_b64 <- base64enc::base64encode(ipc_raw)
+  }
 
   # --- JSON payload: base64 Arrow IPC + metadata ---
   payload <- list(
     arrow_ipc = arrow_b64,
+    parquet_b64 = if (!is.null(parquet_payload)) parquet_payload$b64 else NULL,
+    parquet_row_groups = if (!is.null(parquet_payload)) parquet_payload$n_row_groups else NULL,
     fill_is_column = fill_payload$fill_is_column,
     fill_color = fill_payload$fill_color,
     fill_per_cell = has_rgba_cols,
@@ -362,6 +379,7 @@ a5_view_update <- function(
     cli::cli_abort("{.arg lod_step} must be a positive integer.")
   }
   lod_step <- as.integer(lod_step)
+  # a5_view_update mirrors a5_view's pyramid-always-lazy behaviour.
 
   fill_quo <- rlang::enquo(fill)
   fill_expr <- rlang::quo_get_expr(fill_quo)
@@ -422,12 +440,26 @@ a5_view_update <- function(
     arrow_cols[["_fill_b"]] <- arrow::Array$create(pdf[["_fill_b"]], type = arrow::uint8())
     arrow_cols[["_fill_a"]] <- arrow::Array$create(pdf[["_fill_a"]], type = arrow::uint8())
   }
-  arrow_tbl <- do.call(arrow::arrow_table, arrow_cols)
-  ipc_raw <- arrow::write_to_raw(arrow_tbl, format = "stream")
-  arrow_b64 <- base64enc::base64encode(ipc_raw)
+
+  parquet_payload <- NULL
+  if (aggregate != "none") {
+    parquet_payload <- serialise_pyramid_to_parquet(
+      pdf, arrow_cells,
+      has_fill_value = has_fill_value,
+      has_rgba_cols = has_rgba_cols,
+      extruded = FALSE
+    )
+    arrow_b64 <- NULL
+  } else {
+    arrow_tbl <- do.call(arrow::arrow_table, arrow_cols)
+    ipc_raw <- arrow::write_to_raw(arrow_tbl, format = "stream")
+    arrow_b64 <- base64enc::base64encode(ipc_raw)
+  }
 
   msg <- list(
     arrow_ipc = arrow_b64,
+    parquet_b64 = if (!is.null(parquet_payload)) parquet_payload$b64 else NULL,
+    parquet_row_groups = if (!is.null(parquet_payload)) parquet_payload$n_row_groups else NULL,
     fill_is_column = fill_payload$fill_is_column,
     fill_color = fill_payload$fill_color,
     fill_per_cell = has_rgba_cols,

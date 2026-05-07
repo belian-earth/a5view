@@ -209,6 +209,174 @@ build_a5_pyramid <- function(leaf_cells, df, data_resolution, lod_step,
   )
 }
 
+#' Serialise a pyramid table to base64-encoded parquet bytes
+#'
+#' Sorts the pyramid by `(_lod ASC, pentagon ASC)`, writes parquet with a
+#' fixed `chunk_size` (one row group per chunk), and stuffs a JSON
+#' index of per-row-group `{rg, lod_min, lod_max, west, south, east, north}`
+#' into the schema's KV metadata. The JS side reads this index up-front
+#' and decodes only the row groups whose LOD matches the picked LOD and
+#' whose bbox overlaps the viewport.
+#'
+#' Cell IDs are emitted as zero-padded fixed-width hex via
+#' `a5R::a5_cell_to_arrow`, so a lexicographic sort on the hex column
+#' matches the underlying uint64 ordering.
+#'
+#' @param pdf Pyramid data frame (must contain `pentagon`, `_lod`).
+#' @param arrow_cells `a5_cell` vector aligned to `pdf` rows.
+#' @param has_fill_value,has_rgba_cols,extruded Schema flags.
+#' @param row_group_size Integer. Rows per parquet row group.
+#' @return Length-1 list `list(b64, n_row_groups)`.
+#' @noRd
+serialise_pyramid_to_parquet <- function(pdf, arrow_cells,
+                                         has_fill_value, has_rgba_cols,
+                                         extruded,
+                                         row_group_size = 10000L,
+                                         pivot_offset = 4L,
+                                         min_lod = 2L) {
+  row_group_size <- as.integer(row_group_size)
+  pivot_offset <- as.integer(pivot_offset)
+  min_lod <- as.integer(min_lod)
+
+  # Plan row groups per LOD. Goals: low LODs collapse to one tiny row
+  # group (wide-zoom initial paint = decode <1k rows). High LODs that
+  # exceed row_group_size are bucketed by parent at (lod - pivot_offset)
+  # so each row group has a tight regional bbox; JS-side viewport
+  # pruning then decodes only the parents intersecting the view.
+  #
+  # We collect a list of "row index" vectors, one per row group, each
+  # indexing into the input pdf+arrow_cells. After planning we permute
+  # the table so each plan entry maps to a contiguous slice.
+  unique_lods <- sort(unique(pdf[["_lod"]]))
+  plan_indices <- list()
+  plan_lods <- integer(0)
+  plan_tile_ids <- character(0)  # NA_character_ for non-tiled row groups
+  for (lod in unique_lods) {
+    lod_idx <- which(pdf[["_lod"]] == lod)
+    n_lod <- length(lod_idx)
+    if (n_lod <= row_group_size) {
+      plan_indices[[length(plan_indices) + 1L]] <- lod_idx
+      plan_lods <- c(plan_lods, lod)
+      plan_tile_ids <- c(plan_tile_ids, NA_character_)
+      next
+    }
+    parent_lod <- max(min_lod, lod - pivot_offset)
+    if (parent_lod >= lod) {
+      # Pivot collapses to current LOD: no spatial bucketing possible,
+      # fall back to row_group_size chunks (and no tile_id either).
+      starts_in_lod <- seq.int(1L, n_lod, by = row_group_size)
+      for (s in starts_in_lod) {
+        e <- min(n_lod, s + row_group_size - 1L)
+        plan_indices[[length(plan_indices) + 1L]] <- lod_idx[s:e]
+        plan_lods <- c(plan_lods, lod)
+        plan_tile_ids <- c(plan_tile_ids, NA_character_)
+      }
+      next
+    }
+    parents <- a5R::a5_cell_to_parent(arrow_cells[lod_idx], resolution = parent_lod)
+    parent_keys <- format(parents)
+    by_parent <- split(lod_idx, parent_keys)
+    parent_names <- names(by_parent)
+    for (i in seq_along(by_parent)) {
+      group_rows <- by_parent[[i]]
+      tile_id <- parent_names[[i]]
+      n <- length(group_rows)
+      if (n <= row_group_size) {
+        plan_indices[[length(plan_indices) + 1L]] <- group_rows
+        plan_lods <- c(plan_lods, lod)
+        plan_tile_ids <- c(plan_tile_ids, tile_id)
+      } else {
+        starts <- seq.int(1L, n, by = row_group_size)
+        for (s in starts) {
+          e <- min(n, s + row_group_size - 1L)
+          plan_indices[[length(plan_indices) + 1L]] <- group_rows[s:e]
+          plan_lods <- c(plan_lods, lod)
+          plan_tile_ids <- c(plan_tile_ids, tile_id)
+        }
+      }
+    }
+  }
+
+  # Permute the table so each plan entry maps to a contiguous slice.
+  new_order <- unlist(plan_indices, use.names = FALSE)
+  pdf <- pdf[new_order, , drop = FALSE]
+  arrow_cells <- arrow_cells[new_order]
+
+  arrow_cols <- list(pentagon = a5R::a5_cell_to_arrow(arrow_cells))
+  arrow_cols[["_lod"]] <- arrow::Array$create(pdf[["_lod"]], type = arrow::uint8())
+  if (has_fill_value) arrow_cols[["_fill_value"]] <- pdf[["_fill_value"]]
+  if (has_rgba_cols) {
+    arrow_cols[["_fill_r"]] <- arrow::Array$create(pdf[["_fill_r"]], type = arrow::uint8())
+    arrow_cols[["_fill_g"]] <- arrow::Array$create(pdf[["_fill_g"]], type = arrow::uint8())
+    arrow_cols[["_fill_b"]] <- arrow::Array$create(pdf[["_fill_b"]], type = arrow::uint8())
+    arrow_cols[["_fill_a"]] <- arrow::Array$create(pdf[["_fill_a"]], type = arrow::uint8())
+  }
+  if (extruded) arrow_cols[["_elevation"]] <- pdf[["_elevation"]]
+
+  arrow_tbl <- do.call(arrow::arrow_table, arrow_cols)
+
+  # Now plan_indices' k-th element occupies rows [offsets[k], offsets[k+1]).
+  chunk_lengths <- vapply(plan_indices, length, integer(1L))
+  offsets <- cumsum(c(1L, chunk_lengths))
+  plan <- lapply(seq_along(plan_indices), function(k) {
+    list(start = offsets[k], end = offsets[k] + chunk_lengths[k] - 1L,
+         lod = plan_lods[k])
+  })
+
+  rg_index <- vector("list", length(plan))
+  for (k in seq_along(plan)) {
+    p <- plan[[k]]
+    chunk_cells <- arrow_cells[p$start:p$end]
+    bbox <- unclass(wk::wk_bbox(a5R::a5_cell_to_boundary(chunk_cells)))
+    if (bbox$xmin < -180 || bbox$xmax > 180) {
+      west <- -180; east <- 180
+    } else {
+      west <- bbox$xmin; east <- bbox$xmax
+    }
+    tile_id <- plan_tile_ids[[k]]
+    entry <- list(
+      rg = as.integer(k - 1L),
+      lod_min = as.integer(p$lod),
+      lod_max = as.integer(p$lod),
+      west  = west,
+      south = max(-90, bbox$ymin),
+      east  = east,
+      north = min(90,  bbox$ymax)
+    )
+    if (!is.na(tile_id)) entry$tile_id <- tile_id
+    rg_index[[k]] <- entry
+  }
+  rg_meta_json <- yyjsonr::write_json_str(rg_index, auto_unbox = TRUE)
+
+  arrow_tbl <- arrow_tbl$ReplaceSchemaMetadata(
+    list(a5view_row_groups = rg_meta_json)
+  )
+
+  path <- tempfile(fileext = ".parquet")
+  on.exit(unlink(path), add = TRUE)
+  sink <- arrow::FileOutputStream$create(path)
+  writer <- arrow::ParquetFileWriter$create(
+    arrow_tbl$schema, sink,
+    properties = arrow::ParquetWriterProperties$create(
+      column_names = names(arrow_tbl)
+    )
+  )
+  for (p in plan) {
+    sub <- arrow_tbl$Slice(offset = p$start - 1L, length = p$end - p$start + 1L)
+    # chunk_size = nrow forces this slice to land as exactly one row group,
+    # so the row group index above stays 1:1 with the file's row groups.
+    writer$WriteTable(sub, chunk_size = sub$num_rows)
+  }
+  writer$Close()
+  sink$close()
+
+  bytes <- readBin(path, "raw", n = file.info(path)$size)
+  list(
+    b64 = base64enc::base64encode(bytes),
+    n_row_groups = length(plan)
+  )
+}
+
 #' Resolve elevation column name from NSE expression
 #' @noRd
 resolve_elevation_col <- function(cells, elev_expr) {
