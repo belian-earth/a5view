@@ -57,22 +57,31 @@ a5_build_pyramid <- function(
     fill <- rlang::eval_tidy(fill_quo, data = cells)
   }
 
-  prep <- prepare_pyramid_data(
+  prep <- prepare_view_data(
     cells = cells,
     fill = fill,
     fill_expr = fill_expr,
     fill_identity = fill_identity,
     palette = palette,
-    elev_expr = elev_expr,
-    aggregate = aggregate,
-    lod_step = lod_step
+    elev_expr = elev_expr
+  )
+  if (is.null(prep)) {
+    cli::cli_abort("No non-NA cells to display.")
+  }
+
+  pyramid <- build_a5_pyramid(
+    leaf_cells = prep$leaf_cells,
+    df = prep$df,
+    data_resolution = prep$data_resolution,
+    lod_step = lod_step,
+    aggregate = aggregate
   )
 
   view_state <- auto_view(prep$df[["pentagon"]], lng, lat, zoom)
 
   meta <- list(
     data_resolution = prep$data_resolution,
-    lod_resolutions = as.list(as.integer(prep$lod_resolutions)),
+    lod_resolutions = as.list(as.integer(pyramid$lod_resolutions)),
     has_fill_value = prep$has_fill_value,
     fill_per_cell = prep$has_rgba_cols,
     extruded = prep$extruded,
@@ -81,7 +90,7 @@ a5_build_pyramid <- function(
   )
 
   serialise_pyramid_to_parquet(
-    prep$pdf, prep$arrow_cells,
+    pyramid$data, pyramid$cells,
     has_fill_value = prep$has_fill_value,
     has_rgba_cols = prep$has_rgba_cols,
     extruded = prep$extruded,
@@ -201,15 +210,17 @@ a5_view_pyramid <- function(
   widget
 }
 
-#' Shared data prep for the pyramid path
+#' Shared pre-pyramid data prep (used by a5_view, a5_view_update,
+#' a5_build_pyramid)
 #'
-#' Resolves fill + elevation, prepares the data frame, attaches per-cell
-#' RGBA, and constructs the LOD pyramid. Callers (a5_view,
-#' a5_build_pyramid) handle their own NSE around `fill` and `elevation`
-#' and pass the resolved values in.
+#' Resolves fill, prepares the data frame, attaches per-cell RGBA, and
+#' attaches elevation. Stops short of pyramid construction so the
+#' legacy `aggregate = "none"` path can reuse the same helper. Callers
+#' handle NSE around `fill` and `elevation` and pass the evaluated
+#' values plus the original expressions in.
 #' @noRd
-prepare_pyramid_data <- function(cells, fill, fill_expr, fill_identity,
-                                 palette, elev_expr, aggregate, lod_step) {
+prepare_view_data <- function(cells, fill, fill_expr, fill_identity,
+                              palette, elev_expr) {
   n_cells <- if (a5R::is_a5_cell(cells)) length(cells) else nrow(cells)
   fill_resolved <- resolve_fill(cells, fill, fill_expr, n_cells)
 
@@ -234,7 +245,7 @@ prepare_pyramid_data <- function(cells, fill, fill_expr, fill_identity,
   df <- prepared$data
 
   if (nrow(df) == 0L) {
-    cli::cli_abort("No non-NA cells to display.")
+    return(NULL)
   }
 
   fill_payload <- attach_fill(df, fill_resolved, prepared, palette)
@@ -251,28 +262,14 @@ prepare_pyramid_data <- function(cells, fill, fill_expr, fill_identity,
     df[["_elevation"]] <- as.numeric(elev_vals)
   }
 
-  has_fill_value <- "_fill_value" %in% names(df)
-  has_rgba_cols <- "_fill_r" %in% names(df)
-
-  data_resolution <- as.integer(a5R::a5_get_resolution(prepared$a5_cells[[1]]))
-
-  pyramid <- build_a5_pyramid(
-    leaf_cells = prepared$a5_cells,
-    df = df,
-    data_resolution = data_resolution,
-    lod_step = lod_step,
-    aggregate = aggregate
-  )
-
   list(
-    pdf = pyramid$data,
     df = df,
-    arrow_cells = pyramid$cells,
+    leaf_cells = prepared$a5_cells,
+    extra = prepared$extra,
     fill_payload = fill_payload,
-    has_fill_value = has_fill_value,
-    has_rgba_cols = has_rgba_cols,
+    has_fill_value = "_fill_value" %in% names(df),
+    has_rgba_cols = "_fill_r" %in% names(df),
     extruded = extruded,
-    data_resolution = data_resolution,
-    lod_resolutions = pyramid$lod_resolutions
+    data_resolution = as.integer(a5R::a5_get_resolution(prepared$a5_cells[[1]]))
   )
 }

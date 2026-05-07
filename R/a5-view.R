@@ -148,44 +148,27 @@ a5_view <- function(
     fill <- rlang::eval_tidy(fill_quo, data = cells)
   }
 
-  n_cells <- if (a5R::is_a5_cell(cells)) length(cells) else nrow(cells)
-  fill_resolved <- resolve_fill(cells, fill, fill_expr, n_cells)
-
-  # Auto-flip fill_identity when fill is tagged "a5_identity" — this lets
-  # cells_rgb() / cells_pca_rgb() (and any column tagged the same way)
-  # render as packed RGB without a manual fill_identity = TRUE.
-  if (!fill_identity && has_identity_tag(cells, fill_resolved)) {
-    fill_identity <- TRUE
-  }
-
-  # --- Identity fill: convert column/numeric values to literal colours ---
-  if (fill_identity) {
-    if (fill_resolved$type == "column") {
-      fill_resolved$identity <- TRUE
-    } else if (fill_resolved$type == "numeric") {
-      fill_resolved$type <- "identity"
-    } else if (fill_resolved$type == "colors") {
-      # Already hex colour strings — identity is a no-op, pass through
-    } else {
-      cli::cli_abort(
-        "{.code fill_identity = TRUE} requires {.arg fill} to be a numeric vector, hex colour vector, or column name."
-      )
-    }
-  }
-
-  elev_col <- resolve_elevation_col(cells, elev_expr)
-
-  # --- Prepare data ---
-  prepared <- prepare_data(cells)
-  df <- prepared$data
-
-  if (nrow(df) == 0L) {
+  prep <- prepare_view_data(
+    cells = cells,
+    fill = fill,
+    fill_expr = fill_expr,
+    fill_identity = fill_identity,
+    palette = palette,
+    elev_expr = elev_expr
+  )
+  if (is.null(prep)) {
     cli::cli_abort("No non-NA cells to display.")
   }
+  df <- prep$df
+  fill_payload <- prep$fill_payload
+  has_fill_value <- prep$has_fill_value
+  has_rgba_cols <- prep$has_rgba_cols
+  extruded <- prep$extruded
+  data_resolution <- prep$data_resolution
 
   # --- Validate tooltip columns against available data ---
   if (is.character(tooltip)) {
-    avail <- c(names(df), names(prepared$extra))
+    avail <- c(names(df), names(prep$extra))
     bad_tt <- setdiff(tooltip, avail)
     if (length(bad_tt) > 0) {
       cli::cli_abort(
@@ -194,38 +177,19 @@ a5_view <- function(
     }
   }
 
-  # --- Attach fill, elevation, tooltip data ---
-  fill_payload <- attach_fill(df, fill_resolved, prepared, palette)
-  df <- normalize_rgba_cols(fill_payload$df)
-
-  extruded <- !is.null(elev_col)
-  if (extruded) {
-    elev_vals <- prepared$extra[[elev_col]] %||% df[[elev_col]]
-    if (!is.numeric(elev_vals)) {
-      cli::cli_abort(
-        "Elevation column {.val {elev_col}} must be numeric, not {.obj_type_friendly {elev_vals}}."
-      )
-    }
-    df[["_elevation"]] <- as.numeric(elev_vals)
-  }
-
   pickable <- !isFALSE(tooltip)
-  has_fill_value <- "_fill_value" %in% names(df)
-  has_rgba_cols <- "_fill_r" %in% names(df)
 
   # --- Auto-center view ---
   view_state <- auto_view(df[["pentagon"]], lng, lat, zoom)
-
-  data_resolution <- as.integer(a5R::a5_get_resolution(prepared$a5_cells[[1]]))
 
   if (aggregate == "none") {
     # Legacy path: leaf-only payload, rendered as a single A5Layer.
     pdf <- df
     lod_resolutions <- NULL
-    arrow_cells <- prepared$a5_cells
+    arrow_cells <- prep$leaf_cells
   } else {
     pyramid <- build_a5_pyramid(
-      leaf_cells = prepared$a5_cells,
+      leaf_cells = prep$leaf_cells,
       df = df,
       data_resolution = data_resolution,
       lod_step = lod_step,
@@ -386,37 +350,29 @@ a5_view_update <- function(
   if (is.call(fill_expr) && is.data.frame(cells)) {
     fill <- rlang::eval_tidy(fill_quo, data = cells)
   }
-  n_cells <- if (a5R::is_a5_cell(cells)) length(cells) else nrow(cells)
-  fill_resolved <- resolve_fill(cells, fill, fill_expr, n_cells)
 
-  # Auto-flip identity for tagged outputs (e.g. cells_rgb / cells_pca_rgb).
-  if (has_identity_tag(cells, fill_resolved)) {
-    if (fill_resolved$type == "column") {
-      fill_resolved$identity <- TRUE
-    } else if (fill_resolved$type == "numeric") {
-      fill_resolved$type <- "identity"
-    }
-  }
-
-  prepared <- prepare_data(cells)
-  df <- prepared$data
-
-  if (nrow(df) == 0L) return(invisible(NULL))
-
-  fill_payload <- attach_fill(df, fill_resolved, prepared, palette)
-  df <- normalize_rgba_cols(fill_payload$df)
-  has_fill_value <- "_fill_value" %in% names(df)
-  has_rgba_cols <- "_fill_r" %in% names(df)
-
-  data_resolution <- as.integer(a5R::a5_get_resolution(prepared$a5_cells[[1]]))
+  prep <- prepare_view_data(
+    cells = cells,
+    fill = fill,
+    fill_expr = fill_expr,
+    fill_identity = FALSE,
+    palette = palette,
+    elev_expr = NULL
+  )
+  if (is.null(prep)) return(invisible(NULL))
+  df <- prep$df
+  fill_payload <- prep$fill_payload
+  has_fill_value <- prep$has_fill_value
+  has_rgba_cols <- prep$has_rgba_cols
+  data_resolution <- prep$data_resolution
 
   if (aggregate == "none") {
     pdf <- df
     lod_resolutions <- NULL
-    arrow_cells <- prepared$a5_cells
+    arrow_cells <- prep$leaf_cells
   } else {
     pyramid <- build_a5_pyramid(
-      leaf_cells = prepared$a5_cells,
+      leaf_cells = prep$leaf_cells,
       df = df,
       data_resolution = data_resolution,
       lod_step = lod_step,
