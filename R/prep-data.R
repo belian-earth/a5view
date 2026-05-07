@@ -226,14 +226,27 @@ build_a5_pyramid <- function(leaf_cells, df, data_resolution, lod_step,
 #' @param arrow_cells `a5_cell` vector aligned to `pdf` rows.
 #' @param has_fill_value,has_rgba_cols,extruded Schema flags.
 #' @param row_group_size Integer. Rows per parquet row group.
-#' @return Length-1 list `list(b64, n_row_groups)`.
+#' @param path Destination path for the parquet file. When `NULL`
+#'   (default), a tempfile is used and unlinked on exit; the bytes are
+#'   read back and returned as base64 for inline transfer to the
+#'   browser. When supplied, the file is written to that path and
+#'   left in place; no base64 is returned.
+#' @param meta Optional named list of additional KV metadata entries
+#'   to embed in the parquet schema (one entry per name; values must
+#'   be JSON-serialisable). Used by [a5_build_pyramid()] /
+#'   [a5_view_pyramid()] to round-trip view-time defaults that are
+#'   normally derived from the source data frame.
+#' @return List `list(b64, n_row_groups, path)`. `b64` is `NULL` when
+#'   `path` was supplied.
 #' @noRd
 serialise_pyramid_to_parquet <- function(pdf, arrow_cells,
                                          has_fill_value, has_rgba_cols,
                                          extruded,
                                          row_group_size = 10000L,
                                          pivot_offset = 4L,
-                                         min_lod = 2L) {
+                                         min_lod = 2L,
+                                         path = NULL,
+                                         meta = NULL) {
   row_group_size <- as.integer(row_group_size)
   pivot_offset <- as.integer(pivot_offset)
   min_lod <- as.integer(min_lod)
@@ -348,12 +361,17 @@ serialise_pyramid_to_parquet <- function(pdf, arrow_cells,
   }
   rg_meta_json <- yyjsonr::write_json_str(rg_index, auto_unbox = TRUE)
 
-  arrow_tbl <- arrow_tbl$ReplaceSchemaMetadata(
-    list(a5view_row_groups = rg_meta_json)
-  )
+  schema_kv <- list(a5view_row_groups = rg_meta_json)
+  if (!is.null(meta) && length(meta) > 0L) {
+    schema_kv$a5view_meta <- yyjsonr::write_json_str(meta, auto_unbox = TRUE)
+  }
+  arrow_tbl <- arrow_tbl$ReplaceSchemaMetadata(schema_kv)
 
-  path <- tempfile(fileext = ".parquet")
-  on.exit(unlink(path), add = TRUE)
+  caller_supplied_path <- !is.null(path)
+  if (!caller_supplied_path) {
+    path <- tempfile(fileext = ".parquet")
+    on.exit(unlink(path), add = TRUE)
+  }
   sink <- arrow::FileOutputStream$create(path)
   writer <- arrow::ParquetFileWriter$create(
     arrow_tbl$schema, sink,
@@ -370,11 +388,28 @@ serialise_pyramid_to_parquet <- function(pdf, arrow_cells,
   writer$Close()
   sink$close()
 
-  bytes <- readBin(path, "raw", n = file.info(path)$size)
-  list(
-    b64 = base64enc::base64encode(bytes),
-    n_row_groups = length(plan)
-  )
+  if (caller_supplied_path) {
+    list(b64 = NULL, n_row_groups = length(plan), path = path)
+  } else {
+    bytes <- readBin(path, "raw", n = file.info(path)$size)
+    list(
+      b64 = base64enc::base64encode(bytes),
+      n_row_groups = length(plan),
+      path = path
+    )
+  }
+}
+
+#' Read the embedded `a5view_meta` KV entry from a pyramid parquet file
+#'
+#' Returns the parsed JSON object, or `NULL` if the entry is missing.
+#' @noRd
+read_pyramid_meta <- function(path) {
+  reader <- arrow::ParquetFileReader$create(path)
+  kv <- reader$GetSchema()$metadata
+  json <- kv[["a5view_meta"]]
+  if (is.null(json)) return(NULL)
+  yyjsonr::read_json_str(json)
 }
 
 #' Resolve elevation column name from NSE expression
