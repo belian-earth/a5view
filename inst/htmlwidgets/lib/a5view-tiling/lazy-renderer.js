@@ -133,6 +133,9 @@
       flatRowsCache = new Map();
       tileRowsCacheByLod = new Map();
       tilesetClassesByLod = new Map();
+      prevWarmLod = null;
+      lodChangedAt = 0;
+      if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
       ready = false;
       loadVersion++;
     }
@@ -589,7 +592,47 @@
       });
     }
 
+    function buildLayerAtLod(x, lod) {
+      var byTile = tilesByLod.get(lod);
+      if (byTile && byTile.size > 0) return buildTiledLayer(x, lod, byTile);
+      var flat = flatByLod.get(lod);
+      if (flat && flat.length > 0) return buildFlatLayer(x, lod, flat);
+      return null;
+    }
+
+    // Has any row group at this LOD landed in decodedCache yet? Used
+    // to decide whether the new LOD is "warm enough" to drop the
+    // previous-LOD hold layer.
+    function lodHasDecodedData(lod) {
+      var flatKey = loadVersion + "|" + lod;
+      var flatCached = flatRowsCache.get(flatKey);
+      if (flatCached && flatCached.rows && flatCached.rows.length > 0) return true;
+      var byTile = tilesByLod.get(lod);
+      if (!byTile) return false;
+      var found = false;
+      byTile.forEach(function (rgs) {
+        if (found) return;
+        for (var i = 0; i < rgs.length; i++) {
+          if (decodedCache.has(rgs[i])) { found = true; return; }
+        }
+      });
+      return found;
+    }
+
     var lastBuiltLod = null;
+    // Last LOD that had decoded data when buildLodLayer ran. While the
+    // current LOD is still cold (or within MIN_HOLD_MS of the LOD
+    // change) we restack this LOD's layer beneath the new one so the
+    // crossover is visible rather than instantaneous.
+    var prevWarmLod = null;
+    var lodChangedAt = 0;
+    var holdTimer = null;
+    // Minimum hold (ms) read live from TILING so it can be tweaked
+    // in the browser console: A5View.tiling.MIN_HOLD_MS = 250.
+    function getMinHoldMs() {
+      var v = TILING && TILING.MIN_HOLD_MS;
+      return (typeof v === "number" && v >= 0) ? v : 200;
+    }
     function buildLodLayer(x, viewport) {
       if (!ready || !rgIndex || !window.A5) return null;
       var schedule = x.lod_resolutions || null;
@@ -603,17 +646,36 @@
                     " (R=" + R + ", zoom=" + (viewport.zoom || 0).toFixed(2) +
                     ") tiled=" + tilesByLod.has(lod) + " flat=" + flatByLod.has(lod));
         lastBuiltLod = lod;
+        lodChangedAt = nowMs();
+        // Schedule a rebuild just past the hold window so the prev
+        // layer drops cleanly even if no decode lands in the meantime.
+        if (holdTimer) clearTimeout(holdTimer);
+        holdTimer = setTimeout(function () {
+          holdTimer = null;
+          if (ctx.onDataReady) ctx.onDataReady();
+        }, getMinHoldMs() + 32);
       }
 
-      var byTile = tilesByLod.get(lod);
-      if (byTile && byTile.size > 0) {
-        return buildTiledLayer(x, lod, byTile);
+      var current = buildLayerAtLod(x, lod);
+      if (current == null) return null;
+
+      var holdElapsed = (nowMs() - lodChangedAt) >= getMinHoldMs();
+      if (lodHasDecodedData(lod) && holdElapsed) {
+        prevWarmLod = lod;
+        return current;
       }
-      var flat = flatByLod.get(lod);
-      if (flat && flat.length > 0) {
-        return buildFlatLayer(x, lod, flat);
+      // Skip the stacked hold at non-solid opacity: alpha compositing
+      // two LODs is visibly denser than the single layer the user
+      // expects, and the cell geometries don't align cleanly enough
+      // for that to look intentional.
+      if (ctx.getOpacity() < 1 - 1e-6) {
+        return current;
       }
-      return null;
+      if (prevWarmLod != null && prevWarmLod !== lod) {
+        var prev = buildLayerAtLod(x, prevWarmLod);
+        if (prev) return [prev, current];
+      }
+      return current;
     }
 
     return {

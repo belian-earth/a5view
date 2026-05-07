@@ -61,6 +61,13 @@
 
   TILING.BBOX_QUANTUM_DIVISOR = 32;
 
+  // Minimum time (ms) the previous LOD's layer stays in the scene
+  // after a LOD change in the lazy/pyramid renderer. Forces a visible
+  // crossover even when decodes are fast. <100 is invisible; >300 feels
+  // laggy. Read live from the lazy renderer on every rebuild, so you
+  // can tweak in the console: A5View.tiling.MIN_HOLD_MS = 250.
+  TILING.MIN_HOLD_MS = 1000;
+
   // Above this row count, an LOD renders through a deck.gl TileLayer
   // (per-tile sub-layers cached across renders) instead of one big
   // SolidPolygonLayer. Below: single layer is cheaper than the tile

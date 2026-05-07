@@ -791,7 +791,11 @@ HTMLWidgets.widget({
       //   2. Legacy single A5Layer: aggregate = "none", no LOD pyramid.
       if (x.parquet_b64) {
         var lz = lazyRenderer.buildLodLayer(x, getCurrentViewport());
-        if (lz) layers.push(lz);
+        if (Array.isArray(lz)) {
+          for (var i = 0; i < lz.length; i++) layers.push(lz[i]);
+        } else if (lz) {
+          layers.push(lz);
+        }
       } else {
         var a5l = buildA5Layer(x);
         if (a5l) layers.push(a5l);
