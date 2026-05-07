@@ -543,6 +543,16 @@ HTMLWidgets.widget({
       return String(p);
     }
 
+    // Resolve a [lon, lat] coordinate to the A5 cell BigInt at the
+    // dataset's native resolution. Highlight + tooltip use this so
+    // they're independent of which layers are actually rendered.
+    function coordToCell(coord) {
+      if (!coord || !window.A5 || !lastPayload) return null;
+      var res = lastPayload.data_resolution;
+      if (res == null) return null;
+      return window.A5.lonLatToCell([coord[0], coord[1]], res);
+    }
+
     // Bumped on every data swap. The LOD renderer's per-version caches
     // (group partition, bbox bounds, visible-set) read this to detect
     // staleness.
@@ -632,30 +642,6 @@ HTMLWidgets.widget({
         elevationScale: x.elevation_scale,
         pickable: x.pickable && !drawMode,
         autoHighlight: false,
-        onHover: function (info) {
-          var newHover = (info && info.object) ? info.object.pentagon : null;
-          if (newHover !== hoveredPentagon) {
-            hoveredPentagon = newHover;
-            scheduleRedraw();
-            if (typeof Shiny !== "undefined" && Shiny.setInputValue) {
-              Shiny.setInputValue(el.id + "_hover", pentToHex(newHover),
-                { priority: "event" });
-            }
-          }
-        },
-        onClick: function (info) {
-          if (info && info.object) {
-            var id = info.object.pentagon;
-            clickedPentagon = (clickedPentagon === id) ? null : id;
-            if (deckgl && lastPayload) {
-              deckgl.setProps({ layers: buildLayers(lastPayload) });
-            }
-            if (typeof Shiny !== "undefined" && Shiny.setInputValue) {
-              Shiny.setInputValue(el.id + "_click", pentToHex(clickedPentagon),
-                { priority: "event" });
-            }
-          }
-        },
         stroked: x.stroked,
         getLineColor: x.line_color || [0, 0, 0, 0],
         getLineWidth: x.line_width || 1,
@@ -682,27 +668,6 @@ HTMLWidgets.widget({
       getOpacity: function () { return currentOpacity; },
       getGlobe: function () { return currentGlobe; },
       getDrawMode: function () { return drawMode; },
-      getPickable: function (x) { return x.pickable && !drawMode; },
-      onHover: function (pentagon) {
-        if (pentagon !== hoveredPentagon) {
-          hoveredPentagon = pentagon;
-          scheduleRedraw();
-          if (typeof Shiny !== "undefined" && Shiny.setInputValue) {
-            Shiny.setInputValue(el.id + "_hover", pentToHex(pentagon),
-              { priority: "event" });
-          }
-        }
-      },
-      onClick: function (pentagon) {
-        clickedPentagon = (clickedPentagon === pentagon) ? null : pentagon;
-        if (deckgl && lastPayload) {
-          deckgl.setProps({ layers: buildLayers(lastPayload) });
-        }
-        if (typeof Shiny !== "undefined" && Shiny.setInputValue) {
-          Shiny.setInputValue(el.id + "_click", pentToHex(clickedPentagon),
-            { priority: "event" });
-        }
-      },
       // Called by the lazy renderer when a row-group decode lands.
       onDataReady: function () { scheduleRebuild(); }
     };
@@ -825,15 +790,8 @@ HTMLWidgets.widget({
       //      hyparquet-backed row-group decode on demand.
       //   2. Legacy single A5Layer: aggregate = "none", no LOD pyramid.
       if (x.parquet_b64) {
-        // The lazy tiled path returns an array of per-tile A5Layers
-        // (so deck.gl reconciles each tile by stable id and we get
-        // per-tile GPU caching). The flat path returns a single layer.
         var lz = lazyRenderer.buildLodLayer(x, getCurrentViewport());
-        if (Array.isArray(lz)) {
-          for (var i = 0; i < lz.length; i++) layers.push(lz[i]);
-        } else if (lz) {
-          layers.push(lz);
-        }
+        if (lz) layers.push(lz);
       } else {
         var a5l = buildA5Layer(x);
         if (a5l) layers.push(a5l);
@@ -996,28 +954,9 @@ HTMLWidgets.widget({
         }
 
         var tooltipFn = function(info) {
-              if (!info || !info.object || !lastPayload || !lastPayload.tooltip) return null;
-              var id = info.object.pentagon;
-
-              var idStr = (typeof id === "bigint")
-                ? id.toString(16).padStart(16, "0")
-                : String(id);
-              if (clickedPentagon === id) {
-                return { text: idStr };
-              }
-
-              var cols = lastPayload.data;
-              if (lastPayload.has_fill_value && cols && cols.fillValues && info.index >= 0) {
-                var val = cols.fillValues.get(info.index);
-                if (val != null) {
-                  var display = (typeof val === "number")
-                    ? (Number.isInteger(val) ? val.toString() : val.toPrecision(4))
-                    : String(val);
-                  return { text: display };
-                }
-              }
-
-              return { text: idStr };
+              if (!hoveredPentagon || !lastPayload || !lastPayload.tooltip) return null;
+              if (drawMode) return null;
+              return { text: pentToHex(hoveredPentagon) };
             };
 
         var layers = buildLayers(x);
@@ -1064,6 +1003,18 @@ HTMLWidgets.widget({
                   lat: info.coordinate[1]
                 });
               }
+              // Coord-driven cell highlight: independent of which layers
+              // are rendered, so it works the same in both legacy and
+              // pyramid modes.
+              var cell = coordToCell(info && info.coordinate);
+              if (cell !== hoveredPentagon) {
+                hoveredPentagon = cell;
+                scheduleRedraw();
+                if (typeof Shiny !== "undefined" && Shiny.setInputValue) {
+                  Shiny.setInputValue(el.id + "_hover", pentToHex(cell),
+                    { priority: "event" });
+                }
+              }
             },
             onClick: function(info) {
               if (drawMode && info && info.coordinate) {
@@ -1076,13 +1027,15 @@ HTMLWidgets.widget({
                   lat: info.coordinate[1]
                 }, {priority: "event"});
               }
-              if (!info || !info.object) {
-                if (clickedPentagon) {
-                  clickedPentagon = null;
-                  if (lastPayload) {
-                    deckgl.setProps({ layers: buildLayers(lastPayload) });
-                  }
-                }
+              // Coord-driven cell click: same path for both modes.
+              var cell = coordToCell(info && info.coordinate);
+              clickedPentagon = (clickedPentagon === cell) ? null : cell;
+              if (lastPayload) {
+                deckgl.setProps({ layers: buildLayers(lastPayload) });
+              }
+              if (typeof Shiny !== "undefined" && Shiny.setInputValue) {
+                Shiny.setInputValue(el.id + "_click", pentToHex(clickedPentagon),
+                  { priority: "event" });
               }
             }
           };

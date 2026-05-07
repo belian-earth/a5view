@@ -102,10 +102,11 @@
     // sees the same `data` on rebuilds and skips GPU re-upload.
     var flatRowsCache = new Map(); // (loadVersion + lod) -> {rows, complete}
 
-    // Cap concurrent parquetReadObjects calls so a sudden burst (deck.gl
-    // entering a tiled LOD with 100s of visible tiles) doesn't swamp
-    // the main thread's microtask queue.
-    var MAX_CONCURRENT_DECODES = 6;
+    // Cap concurrent parquetReadObjects calls. Bounded mainly to keep
+    // 1000s-of-tiles bursts from runaway-queueing on the microtask
+    // queue; for typical viewport sizes this is large enough to drain
+    // in one continuous burst, minimising blank-tile time on zoom.
+    var MAX_CONCURRENT_DECODES = 32;
     var decodeQueue = []; // FIFO of pending rgIdx requests
 
     // ctx.onDataReady → scheduleRebuild in the host, which already
@@ -132,7 +133,6 @@
       flatRowsCache = new Map();
       tileRowsCacheByLod = new Map();
       tilesetClassesByLod = new Map();
-      tileLayerInstanceByLod = new Map();
       ready = false;
       loadVersion++;
     }
@@ -220,8 +220,6 @@
             flat.push(entry.rg);
           }
         }
-
-        recomputeHighestFlatLod();
 
         ready = true;
         var tReady = nowMs();
@@ -338,16 +336,10 @@
         },
         getFillColor: getFillColor,
         opacity: ctx.getOpacity(),
-        pickable: ctx.getPickable(x),
+        pickable: x.pickable && !ctx.getDrawMode(),
         autoHighlight: false,
         extruded: x.extruded,
         elevationScale: x.elevation_scale,
-        onHover: function (info) {
-          ctx.onHover((info && info.object) ? info.object.__pent : null);
-        },
-        onClick: function (info) {
-          if (info && info.object) ctx.onClick(info.object.__pent);
-        },
         stroked: x.stroked,
         getLineColor: x.line_color || [0, 0, 0, 0],
         getLineWidth: x.line_width || 1,
@@ -421,13 +413,6 @@
     // Tileset2D class cache, keyed by (lod, loadVersion). Rebuilt only
     // on data swap.
     var tilesetClassesByLod = new Map();
-    // TileLayer instance cache, keyed by (lod, loadVersion). Critical:
-    // without this, every scheduleRebuild (one per decode landing)
-    // creates a brand-new TileLayer, deck.gl tears down the old one
-    // and re-runs Tileset2D init, getTileData on every tile, etc.
-    // Returning the same instance lets deck.gl skip the rebuild and
-    // just propagate prop updates internally.
-    var tileLayerInstanceByLod = new Map();
 
     function bboxOverlapXY(b, q) {
       if (q.west <= q.east) {
@@ -494,16 +479,10 @@
         getPolygon: function (d) { return d.polygon; },
         getFillColor: getFillColor,
         opacity: ctx.getOpacity(),
-        pickable: ctx.getPickable(x),
+        pickable: x.pickable && !ctx.getDrawMode(),
         autoHighlight: false,
         extruded: x.extruded,
         elevationScale: x.elevation_scale,
-        onHover: function (info) {
-          ctx.onHover((info && info.object) ? info.object.pentagon : null);
-        },
-        onClick: function (info) {
-          if (info && info.object) ctx.onClick(info.object.pentagon);
-        },
         updateTriggers: {
           getFillColor: updateKey,
           getElevation: updateKey
@@ -527,7 +506,7 @@
     }
 
     // Custom Tileset2D: atomic A5 tiles, no parent walks.
-    function makeLazyA5TilesetClass(lod, byTile, bboxByTile) {
+    function makeLazyA5TilesetClass(lod, bboxByTile) {
       var Base = window.deck && (window.deck._Tileset2D || window.deck.Tileset2D);
       if (!Base) throw new Error("deck.Tileset2D not found");
       return class extends Base {
@@ -563,26 +542,30 @@
       };
     }
 
-    function buildTiledLayer(x, lod, byTile, viewport) {
+    function buildTiledLayer(x, lod, byTile) {
       var ver = loadVersion;
-      var cachedLayer = tileLayerInstanceByLod.get(lod);
-      if (cachedLayer && cachedLayer.ver === ver) return cachedLayer.layer;
-
       var bboxByTile = bboxByLod.get(lod);
       var entry = tilesetClassesByLod.get(lod);
       var TilesetClass;
       if (entry && entry.ver === ver) {
         TilesetClass = entry.cls;
       } else {
-        TilesetClass = makeLazyA5TilesetClass(lod, byTile, bboxByTile);
+        TilesetClass = makeLazyA5TilesetClass(lod, bboxByTile);
         tilesetClassesByLod.set(lod, { cls: TilesetClass, ver: ver });
       }
 
-      var layer = new window.deck.TileLayer({
+      // Pass opacity up to TileLayer so deck.gl detects the change and
+      // nulls tile.layers, forcing renderSubLayers to re-run with the
+      // latest ctx.getOpacity(). Without this, deck.gl's prop diff sees
+      // nothing changed and skips sublayer regen, so the slider's
+      // effect never propagates.
+      return new window.deck.TileLayer({
         id: "a5-lazy-tiles-lod" + lod + "-v" + ver,
         data: [],
         TilesetClass: TilesetClass,
         extent: [-180, -85.05, 180, 85.05],
+        opacity: ctx.getOpacity(),
+        pickable: x.pickable && !ctx.getDrawMode(),
         getTileData: function (props) {
           var hex = props.index ? props.index.i : null;
           var rgs = (hex && byTile.get(hex)) || null;
@@ -604,28 +587,6 @@
           );
         }
       });
-      tileLayerInstanceByLod.set(lod, { ver: ver, layer: layer });
-      return layer;
-    }
-
-    // Highest available flat LOD: covers the whole data extent, fully
-    // decoded at init time. Used as a fallback base layer beneath any
-    // tiled-LOD render so the viewport is never empty while finer
-    // tiles are decoding (incremental fade-in) or while a zoom-level
-    // change is in flight.
-    var highestFlatLod = -1;
-    function recomputeHighestFlatLod() {
-      highestFlatLod = -1;
-      flatByLod.forEach(function (_rgs, lod) {
-        if (lod > highestFlatLod) highestFlatLod = lod;
-      });
-    }
-
-    function buildFallbackBaseLayer(x) {
-      if (highestFlatLod < 0) return null;
-      var rgs = flatByLod.get(highestFlatLod);
-      if (!rgs || rgs.length === 0) return null;
-      return buildFlatLayer(x, highestFlatLod, rgs);
     }
 
     var lastBuiltLod = null;
@@ -646,13 +607,7 @@
 
       var byTile = tilesByLod.get(lod);
       if (byTile && byTile.size > 0) {
-        var tileLayer = buildTiledLayer(x, lod, byTile, viewport);
-        // Stack the highest flat LOD beneath as a fallback base — it's
-        // always populated, gives instant coverage during decode,
-        // covers gaps for tiles not yet loaded.
-        var base = buildFallbackBaseLayer(x);
-        if (base && tileLayer) return [base, tileLayer];
-        return base || tileLayer;
+        return buildTiledLayer(x, lod, byTile);
       }
       var flat = flatByLod.get(lod);
       if (flat && flat.length > 0) {
