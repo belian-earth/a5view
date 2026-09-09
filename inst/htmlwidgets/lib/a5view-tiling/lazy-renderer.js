@@ -494,6 +494,7 @@
       prevWarmLod = null;
       lodChangedAt = 0;
       if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+      if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
       ready = false;
       loadVersion++;
     }
@@ -716,10 +717,12 @@
     // Sub-layer instantiation is spread over frames: a flush releases at
     // most MAX_TILES_PER_FLUSH dirty tiles, and renderSubLayers builds
     // at most MAX_NEW_TILES_PER_PASS tiles per synchronous pass (deck
-    // instantiates them after the callbacks return, at roughly 2 ms per
-    // 1k cells), deferring the rest to the next redraw.
-    var MAX_TILES_PER_FLUSH = 8;
-    var MAX_NEW_TILES_PER_PASS = 6;
+    // instantiates them after the callbacks return, at roughly 10 ms
+    // per 4k-cell tile), deferring the rest to a retry a frame later.
+    // Three keeps a fill-in frame around 35 ms; a screenful of tiles
+    // completes over a handful of frames rather than one long one.
+    var MAX_TILES_PER_FLUSH = 6;
+    var MAX_NEW_TILES_PER_PASS = 3;
     var buildPassCount = null;
     function withinBuildBudget() {
       if (buildPassCount == null) {
@@ -736,6 +739,56 @@
       if (!set) { set = new Set(); dirtyTiles.set(lod, set); }
       set.add(hex);
       if (ctx.onDataReady) ctx.onDataReady();
+    }
+    // Retries always go through a timer: a flush can be requested from
+    // inside deck's own render pass (renderSubLayers), and re-entering
+    // the widget's redraw from there leaves tiles half-processed.
+    var retryTimer = null;
+    function scheduleRetry(delay) {
+      if (retryTimer) return;
+      retryTimer = setTimeout(function () {
+        retryTimer = null;
+        if (ctx.onDataReady) ctx.onDataReady();
+      }, delay);
+    }
+    function flushDirtyTiles(lod) {
+      var set = dirtyTiles.get(lod);
+      if (!set || set.size === 0) return;
+      var m = layerMemo.get("a5-lazy-tiles-lod" + lod + "-v" + loadVersion);
+      var tileset = m && m.layer.state && m.layer.state.tileset;
+      if (!tileset) {
+        // deck hasn't applied the layer yet (state moves to the new
+        // instance on its next update); try again shortly.
+        scheduleRetry(50);
+        return;
+      }
+      var released = 0;
+      var tiles = tileset.tiles || tileset._tiles || [];
+      var present = new Set();
+      for (var i = 0; i < tiles.length; i++) {
+        var t = tiles[i];
+        if (!t.index || !set.has(t.index.i)) continue;
+        present.add(t.index.i);
+        if (released < MAX_TILES_PER_FLUSH) {
+          t.layers = null;
+          set.delete(t.index.i);
+          released++;
+        }
+      }
+      // Tiles no longer in the tileset were evicted; they get a fresh
+      // renderSubLayers call if they come back.
+      set.forEach(function (hex) { if (!present.has(hex)) set.delete(hex); });
+      if (released > 0 && typeof m.layer.setNeedsUpdate === "function") m.layer.setNeedsUpdate();
+      if (set.size > 0) scheduleRetry(16);
+    }
+    function flushAllDirtyTiles() {
+      dirtyTiles.forEach(function (set, lod) { if (set.size > 0) flushDirtyTiles(lod); });
+    }
+    function deferTile(lod, hex) {
+      var set = dirtyTiles.get(lod);
+      if (!set) { set = new Set(); dirtyTiles.set(lod, set); }
+      set.add(hex);
+      scheduleRetry(0);
     }
     function flushDirtyTiles(lod) {
       var set = dirtyTiles.get(lod);
@@ -803,7 +856,6 @@
         tilesetClassesByLod.set(lod, { cls: TilesetClass, ver: ver });
       }
       var layerId = "a5-lazy-tiles-lod" + lod + "-v" + ver;
-      flushDirtyTiles(lod);
       return memoLayer(layerId, styleKey(x, stroked), function () {
         return new window.deck.TileLayer({
           id: layerId,
@@ -873,6 +925,7 @@
       if (!ready || !rgIndex || !window.A5) return null;
       var schedule = x.lod_resolutions || null;
       if (!schedule || schedule.length === 0) return null;
+      flushAllDirtyTiles();
 
       var R = TILING.getA5Resolution(viewport);
       var lod = TILING.pickLod(R, schedule);
@@ -946,6 +999,8 @@
           tiledLods: tilesByLod.size,
           flatLods: flatByLod.size,
           indexedLods: Array.from(rowsByLod.keys()),
+          dirtyTiles: Array.from(dirtyTiles.values()).reduce(function (a, s) { return a + s.size; }, 0),
+          retryPending: !!retryTimer,
           worker: !!(decoder && decoder.isWorker)
         };
       }
