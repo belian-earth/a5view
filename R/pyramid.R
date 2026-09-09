@@ -75,15 +75,14 @@ a5_build_pyramid <- function(
     extruded = prep$extruded,
     fill_color = prep$fill_color,
     legend = legend,
-    view_state = auto_view(prep$df[["pentagon"]], lng, lat, zoom)
+    view_state = auto_view(prep$leaf_cells, lng, lat, zoom)
   )
 
   serialise_pyramid_to_parquet(
-    pyramid$data, pyramid$cells,
+    pyramid$data, path,
     has_fill_value = prep$has_fill_value,
     has_rgba_cols = prep$has_rgba_cols,
     extruded = prep$extruded,
-    path = path,
     meta = meta
   )
 
@@ -95,8 +94,10 @@ a5_build_pyramid <- function(
 #' Reads a parquet file produced by [a5_build_pyramid()] and renders it
 #' through the same lazy row-group decoder as [a5_view()] does for
 #' aggregated data. No data preparation or LOD construction happens at
-#' view time; only the parquet bytes and a few KV metadata entries are
-#' shipped to the browser.
+#' view time. Inside Shiny the file is served to the browser over HTTP
+#' with byte-range support, so only the footer and the row groups in
+#' view are transferred, however large the file; outside Shiny the
+#' bytes are embedded in the widget as base64.
 #'
 #' Colours, the data resolution, and the auto-centred view are all
 #' baked into the file at build time. Visualisation-only options
@@ -145,17 +146,15 @@ a5_view_pyramid <- function(
     ))
   }
 
-  bytes <- readBin(path, "raw", n = file.info(path)$size)
-
   view_state <- meta$view_state
   if (!is.null(lng)) view_state$longitude <- lng
   if (!is.null(lat)) view_state$latitude <- lat
   if (!is.null(zoom)) view_state$zoom <- zoom
 
   payload <- c(
+    list(arrow_ipc = NULL),
+    parquet_payload(path, session = shiny_session()),
     list(
-      arrow_ipc = NULL,
-      parquet_b64 = base64enc::base64encode(bytes),
       lod_resolutions = meta$lod_resolutions,
       fill_color = meta$fill_color,
       fill_per_cell = isTRUE(meta$fill_per_cell),

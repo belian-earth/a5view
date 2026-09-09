@@ -75,7 +75,10 @@ in RGB space, which can mute embedding visualisations.
 When set to \code{"rep_child"} or \code{"mean"}, the pyramid is serialised to
 parquet with a spatial row-group index. The browser decodes only
 the row groups intersecting the viewport at the level of detail
-matching the current zoom.
+matching the current zoom. Inside Shiny the parquet file is served
+over HTTP with byte-range support, so only the footer and the
+visible row groups are ever transferred; elsewhere it is embedded
+in the widget as base64.
 }}
 
 \item{lod_step}{Integer >= 1, gap between successive precomputed

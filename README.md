@@ -56,7 +56,9 @@ Features:
 - Globe projection (`globe = TRUE`)
 - Precomputed level-of-detail pyramids for large datasets
   (`aggregate = "rep_child"` / `"mean"`), streamed to the browser as
-  parquet and decoded per viewport
+  parquet and decoded per viewport; inside Shiny the file is served
+  with HTTP range requests so only the row groups in view are
+  transferred
 - Shiny bindings (`a5_viewOutput` / `renderA5_view`) and in-place
   updates via `a5_view_update()`
 - Optional polygon-draw toolbar (`draw_polygon = TRUE`) for selecting

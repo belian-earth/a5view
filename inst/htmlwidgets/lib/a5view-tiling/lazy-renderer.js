@@ -60,6 +60,75 @@
     };
   }
 
+  // AsyncBuffer over an HTTP URL with Range support (the Shiny path).
+  // Slices are served from previously fetched ranges when possible;
+  // callers prefetch whole row groups with `prefetch(start, end)` so a
+  // row-group decode costs one request rather than one per column.
+  function makeRemoteBuffer(url, byteLength) {
+    var ranges = []; // [{start, end, bytes}]
+    function cached(start, end) {
+      for (var i = 0; i < ranges.length; i++) {
+        var r = ranges[i];
+        if (start >= r.start && end <= r.end) {
+          return r.bytes.buffer.slice(
+            r.bytes.byteOffset + (start - r.start),
+            r.bytes.byteOffset + (end - r.start)
+          );
+        }
+      }
+      return null;
+    }
+    function fetchRange(start, end) {
+      return fetch(url, { headers: { Range: "bytes=" + start + "-" + (end - 1) } })
+        .then(function (res) {
+          if (!res.ok) throw new Error("range request failed: " + res.status);
+          return res.arrayBuffer();
+        })
+        .then(function (buf) {
+          var bytes = new Uint8Array(buf);
+          if (bytes.byteLength !== end - start) {
+            // Server ignored the Range header and sent the whole file.
+            if (bytes.byteLength === byteLength) {
+              ranges = [{ start: 0, end: byteLength, bytes: bytes }];
+              return cached(start, end);
+            }
+            throw new Error("unexpected range length " + bytes.byteLength);
+          }
+          ranges.push({ start: start, end: end, bytes: bytes });
+          if (ranges.length > 4096) ranges.splice(0, ranges.length >> 1);
+          return buf;
+        });
+    }
+    return {
+      byteLength: byteLength,
+      slice: function (start, end) {
+        var s = start | 0;
+        var e = (end == null) ? byteLength : (end | 0);
+        var hit = cached(s, e);
+        return hit ? Promise.resolve(hit) : fetchRange(s, e);
+      },
+      prefetch: function (start, end) {
+        return cached(start, end) ? Promise.resolve() : fetchRange(start, end).then(function () {});
+      }
+    };
+  }
+
+  // Byte extent [start, end) of a parquet row group: the column chunks
+  // of a row group are written contiguously.
+  function rowGroupByteRange(rg) {
+    var start = Infinity, end = 0;
+    for (var i = 0; i < rg.columns.length; i++) {
+      var md = rg.columns[i].meta_data;
+      if (!md) continue;
+      var off = Number(md.dictionary_page_offset != null ? md.dictionary_page_offset : md.data_page_offset);
+      if (md.dictionary_page_offset != null && Number(md.data_page_offset) < off) off = Number(md.data_page_offset);
+      var stop = off + Number(md.total_compressed_size);
+      if (off < start) start = off;
+      if (stop > end) end = stop;
+    }
+    return { start: start, end: end };
+  }
+
   // Normalise a pentagon cell value coming back from hyparquet into a
   // BigInt. a5R writes A5 ids as INT64, hyparquet decodes as bigint
   // already; defensive paths cover other shapes (FIXED_LEN_BYTE_ARRAY,
@@ -148,6 +217,8 @@
       tileRowsCacheByLod = new Map();
       tilesetClassesByLod = new Map();
       rowsByLod = new Map();
+      dirtyTiles = new Map();
+      layerMemo = new Map();
       lastBuiltLod = null;
       prevWarmLod = null;
       lodChangedAt = 0;
@@ -166,22 +237,33 @@
       ? function () { return performance.now(); }
       : function () { return Date.now(); };
 
-    function init(parquetB64) {
+    // source: { b64 } (inline, static widgets) or { url, bytes } (served
+    // by Shiny with Range support; only the footer and the row groups
+    // in view are ever fetched).
+    function init(source) {
       reset();
-      log("[a5view] lazy.init: bytes b64=" + (parquetB64 && parquetB64.length));
       var thisLoad = loadVersion;
       var t0 = nowMs();
-      fileBytes = base64ToBytes(parquetB64);
+      var remote = !!source.url;
+      log("[a5view] lazy.init: " + (remote ? "url " + source.url + " bytes=" + source.bytes
+                                           : "inline b64=" + (source.b64 && source.b64.length)));
+      if (remote) {
+        fileBytes = null;
+        asyncBuffer = makeRemoteBuffer(source.url, Number(source.bytes));
+      } else {
+        fileBytes = base64ToBytes(source.b64);
+        asyncBuffer = makeAsyncBuffer(fileBytes);
+      }
       var tBase64 = nowMs();
-      asyncBuffer = makeAsyncBuffer(fileBytes);
 
       return window.A5ViewHyparquetReady.then(function (hp) {
-        if (thisLoad !== loadVersion) return;
-        var ab = fileBytes.buffer.slice(
+        if (remote) return hp.parquetMetadataAsync(asyncBuffer);
+        return hp.parquetMetadata(fileBytes.buffer.slice(
           fileBytes.byteOffset,
           fileBytes.byteOffset + fileBytes.byteLength
-        );
-        var md = hp.parquetMetadata(ab);
+        ));
+      }).then(function (md) {
+        if (thisLoad !== loadVersion) return;
         var tMeta = nowMs();
         metadata = md;
 
@@ -274,6 +356,12 @@
       var off = rgRowOffsets[rgIdx];
       var t0 = nowMs();
       var p = window.A5ViewHyparquetReady.then(function (hp) {
+        if (asyncBuffer.prefetch) {
+          var range = rowGroupByteRange(metadata.row_groups[rgIdx]);
+          return asyncBuffer.prefetch(range.start, range.end).then(function () { return hp; });
+        }
+        return hp;
+      }).then(function (hp) {
         return hp.parquetReadObjects({
           file: asyncBuffer,
           metadata: metadata,
@@ -284,6 +372,7 @@
         pendingDecodes.delete(rgIdx);
         if (thisLoad !== loadVersion) { pumpDecodeQueue(); return []; }
         decodedCache.set(rgIdx, rows);
+        markTileDirty(rgIndex[rgIdx]);
         for (var i = 0; i < rows.length; i++) {
           var row = rows[i];
           var cell = row.__pent || (row.__pent = toBigIntCell(row.pentagon));
@@ -413,6 +502,35 @@
       if (rows.length === 0) return null;
       var key = "flat|" + cacheKey + "|" + rows.length + "|" + (complete ? 1 : 0);
       return buildA5Layer(x, rows, "a5-lazy-flat-" + lod, key);
+    }
+
+    // deck.gl only regenerates a tile's sub-layers when `tile.layers` is
+    // null. TileLayer declares getTileData / renderSubLayers with
+    // `compare: false`, so handing it a fresh layer instance after a
+    // decode lands does nothing by itself; we null the affected tiles
+    // explicitly and ask the layer for an update.
+    var dirtyTiles = new Map(); // lod -> Set<tileHex>
+    function markTileDirty(entry) {
+      if (!entry || !entry.tile_id) return;
+      var set = dirtyTiles.get(entry.lod_min);
+      if (!set) { set = new Set(); dirtyTiles.set(entry.lod_min, set); }
+      set.add(entry.tile_id);
+      flushDirtyTiles(entry.lod_min);
+    }
+    function flushDirtyTiles(lod) {
+      var set = dirtyTiles.get(lod);
+      if (!set || set.size === 0) return;
+      var m = layerMemo.get("a5-lazy-tiles-lod" + lod + "-v" + loadVersion);
+      var tileset = m && m.layer.state && m.layer.state.tileset;
+      if (!tileset) return; // deck hasn't applied the layer yet; retried on next build
+      var touched = false;
+      var tiles = tileset.tiles || tileset._tiles || [];
+      for (var i = 0; i < tiles.length; i++) {
+        var t = tiles[i];
+        if (t.index && set.has(t.index.i)) { t.layers = null; touched = true; }
+      }
+      set.clear();
+      if (touched && typeof m.layer.setNeedsUpdate === "function") m.layer.setNeedsUpdate();
     }
 
     // Tiled path: deck.gl TileLayer with a custom A5 Tileset2D over
@@ -576,9 +694,8 @@
       // nothing changed and skips sublayer regen, so the slider's
       // effect never propagates.
       var layerId = "a5-lazy-tiles-lod" + lod + "-v" + ver;
-      // decodedCache.size in the key: a new instance (and so a
-      // sub-layer regeneration) only when more data has landed.
-      return memoLayer(layerId, styleKey(x) + "|" + decodedCache.size, function () {
+      flushDirtyTiles(lod);
+      return memoLayer(layerId, styleKey(x), function () {
       return new window.deck.TileLayer({
         id: layerId,
         data: EMPTY_DATA,

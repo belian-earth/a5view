@@ -264,11 +264,11 @@ HTMLWidgets.widget({
     function resolveHover(coord) {
       if (!coord || !window.A5 || !lastPayload) return null;
       var x = lastPayload;
-      var res = x.parquet_b64 ? lazyRenderer.currentLod() : x.data_resolution;
+      var res = x.parquet ? lazyRenderer.currentLod() : x.data_resolution;
       if (res == null) return null;
       var cell = window.A5.lonLatToCell([coord[0], coord[1]], res);
       var hex = pentToHex(cell);
-      var row = x.parquet_b64 ? lazyRenderer.findRow(res, hex) : findLegacyRow(hex);
+      var row = x.parquet ? lazyRenderer.findRow(res, hex) : findLegacyRow(hex);
       return row ? { cell: cell, hex: hex, row: row } : null;
     }
 
@@ -806,7 +806,7 @@ HTMLWidgets.widget({
 
     function buildLayers(x) {
       var layers = [];
-      if (x.parquet_b64) {
+      if (x.parquet) {
         var lz = lazyRenderer.buildLodLayer(x, getCurrentViewport());
         if (Array.isArray(lz)) layers = layers.concat(lz);
         else if (lz) layers.push(lz);
@@ -934,7 +934,7 @@ HTMLWidgets.widget({
         updateDebug();
         // The pyramid path is viewport-driven; the in-memory path
         // renders every row so needs no rebuild on move.
-        if (lastPayload && lastPayload.parquet_b64) scheduleRedraw();
+        if (lastPayload && lastPayload.parquet) scheduleRedraw();
       });
       map.on("mousemove", onHover);
       map.on("mouseout", onLeave);
@@ -959,9 +959,9 @@ HTMLWidgets.widget({
       hoveredPentagon = null;
       clickedPentagon = null;
       updateTooltip(null);
-      if (x.parquet_b64) {
+      if (x.parquet) {
         x.data = null;
-        lazyRenderer.init(x.parquet_b64).then(redraw).catch(function (e) {
+        lazyRenderer.init(x.parquet).then(redraw).catch(function (e) {
           console.error("[a5view] pyramid init failed:", e);
         });
       } else if (x.arrow_ipc && typeof Arrow !== "undefined") {
@@ -984,7 +984,7 @@ HTMLWidgets.widget({
          "tooltip_cols", "data_resolution", "lod_resolutions"].forEach(function (k) {
           if (msg[k] !== undefined) lastPayload[k] = msg[k];
         });
-        lastPayload.parquet_b64 = msg.parquet_b64 || null;
+        lastPayload.parquet = msg.parquet || null;
         lastPayload.arrow_ipc = msg.arrow_ipc || null;
         updateLegend(lastPayload);
         loadData(lastPayload);

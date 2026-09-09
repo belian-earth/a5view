@@ -85,7 +85,10 @@
 #'   When set to `"rep_child"` or `"mean"`, the pyramid is serialised to
 #'   parquet with a spatial row-group index. The browser decodes only
 #'   the row groups intersecting the viewport at the level of detail
-#'   matching the current zoom.
+#'   matching the current zoom. Inside Shiny the parquet file is served
+#'   over HTTP with byte-range support, so only the footer and the
+#'   visible row groups are ever transferred; elsewhere it is embedded
+#'   in the widget as base64.
 #' @param lod_step Integer >= 1, gap between successive precomputed
 #'   LODs (only used when `aggregate != "none"`). `1` (default)
 #'   precomputes every level from the data resolution down to the
@@ -158,7 +161,10 @@ a5_view <- function(
   }
 
   tooltip_cols <- resolve_tooltip_cols(tooltip, prep, aggregate)
-  data <- encode_view_data(prep, aggregate, lod_step, tooltip_cols)
+  data <- encode_view_data(
+    prep, aggregate, lod_step, tooltip_cols,
+    session = shiny_session()
+  )
 
   payload <- c(
     data,
@@ -169,7 +175,7 @@ a5_view <- function(
     list(
       extruded = prep$extruded,
       elevation_scale = elevation_scale,
-      view_state = auto_view(prep$df[["pentagon"]], lng, lat, zoom),
+      view_state = auto_view(prep$leaf_cells, lng, lat, zoom),
       data_resolution = prep$data_resolution
     )
   )
@@ -247,7 +253,10 @@ a5_view_update <- function(
   if (is.null(prep)) return(invisible(NULL))
 
   tooltip_cols <- resolve_tooltip_cols(tooltip, prep, aggregate)
-  data <- encode_view_data(prep, aggregate, lod_step, tooltip_cols)
+  data <- encode_view_data(
+    prep, aggregate, lod_step, tooltip_cols,
+    session = session
+  )
 
   msg <- c(
     data,

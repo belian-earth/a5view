@@ -31,9 +31,9 @@ test_that("prepare_data handles bare a5_cell vector", {
   result <- prepare_data(cells)
 
   expect_s3_class(result$data, "data.frame")
-  expect_true("pentagon" %in% names(result$data))
+  expect_true(a5R::is_a5_cell(result$data$cell))
   expect_equal(nrow(result$data), 3)
-  expect_true(all(nchar(result$data$pentagon) == 16))
+  expect_equal(result$a5_cells, cells)
   expect_equal(result$extra, list())
 })
 
@@ -54,8 +54,8 @@ test_that("prepare_data handles data frame with a5_cell column", {
   result <- prepare_data(df)
 
   expect_equal(nrow(result$data), 3)
-  expect_true("pentagon" %in% names(result$data))
-  expect_false("cell" %in% names(result$data))
+  expect_true(a5R::is_a5_cell(result$data$cell))
+  expect_equal(names(result$data), "cell")
   expect_equal(result$extra$value, c(10, 20, 30))
 })
 

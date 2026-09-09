@@ -11,35 +11,38 @@ find_cell_column <- function(df) {
   )
 }
 
-#' Prepare data payload for JS
-#' @return List with `data` (data frame with `pentagon` column),
-#'   `not_na` (logical), `extra` (named list of non-cell columns),
-#'   and `a5_cells` (the non-NA a5_cell vector for Arrow conversion).
+#' Split the input into cells, payload frame and extra columns
+#'
+#' Cells are carried as an `a5_cell` column named `cell` so every
+#' downstream step (grouping, Arrow conversion, view centring) works on
+#' the 8-byte ids directly; hex strings are never formed for the bulk
+#' data.
+#' @return List with `data` (data frame with a `cell` column), `not_na`
+#'   (logical), `extra` (named list of non-cell columns) and `a5_cells`
+#'   (the non-NA `a5_cell` vector, identical to `data$cell`).
 #' @noRd
 prepare_data <- function(cells) {
   if (a5R::is_a5_cell(cells)) {
-    hex <- format(cells)
-    not_na <- !is.na(hex)
-    df <- data.frame(pentagon = hex[not_na], stringsAsFactors = FALSE)
-    return(list(
-      data = df, not_na = not_na, extra = list(),
-      a5_cells = cells[not_na]
-    ))
+    cell_col <- NULL
+    cell_vec <- cells
+    other_cols <- character()
+  } else {
+    cell_col <- find_cell_column(cells)
+    cell_vec <- cells[[cell_col]]
+    other_cols <- setdiff(names(cells), cell_col)
+  }
+  not_na <- !is.na(cell_vec)
+  keep <- cell_vec[not_na]
+
+  extra <- list()
+  if (length(other_cols) > 0L) {
+    extra <- lapply(other_cols, function(nm) cells[[nm]][not_na])
+    names(extra) <- other_cols
   }
 
-  cell_col <- find_cell_column(cells)
-  hex <- format(cells[[cell_col]])
-  not_na <- !is.na(hex)
-
-  other_cols <- setdiff(names(cells), cell_col)
-  extra <- lapply(other_cols, function(nm) cells[[nm]][not_na])
-  names(extra) <- other_cols
-
-  df <- data.frame(pentagon = hex[not_na], stringsAsFactors = FALSE)
-  list(
-    data = df, not_na = not_na, extra = extra,
-    a5_cells = cells[[cell_col]][not_na]
-  )
+  df <- data.frame(row.names = seq_along(keep))
+  df[["cell"]] <- keep
+  list(data = df, not_na = not_na, extra = extra, a5_cells = keep)
 }
 
 #' Build a pre-aggregated multi-resolution pyramid for a5_view rendering
@@ -59,16 +62,20 @@ prepare_data <- function(cells) {
 #'     each parent group. RGBA channels are averaged then rounded back to
 #'     uint8.
 #'
+#' Grouping uses `vctrs::vec_group_id()` on the parent `a5_cell` vectors
+#' (hashed on the raw bytes), which is an order of magnitude cheaper than
+#' formatting hex keys.
+#'
 #' @param leaf_cells `a5_cell` vector at the data resolution.
-#' @param df Data frame with a `pentagon` (hex string) column plus
-#'   optional `_fill_r/g/b/a`, `_fill_value`, `_elevation` columns.
+#' @param df Data frame with a `cell` column plus optional
+#'   `_fill_r/g/b/a`, `_fill_value`, `_elevation` columns.
 #' @param data_resolution Integer A5 resolution of `leaf_cells`.
 #' @param lod_step Integer >= 1, gap between successive LODs.
 #' @param aggregate One of `"rep_child"`, `"mean"`.
 #' @param min_lod Lowest LOD to precompute (default 2).
-#' @return A list with `data` (long data frame including `_lod`), `cells`
-#'   (concatenated `a5_cell` vector matching the row order of `data`), and
-#'   `lod_resolutions` (sorted ascending integer vector).
+#' @return A list with `data` (long data frame with `cell`, `_lod` and
+#'   the payload columns) and `lod_resolutions` (sorted ascending
+#'   integer vector).
 #' @noRd
 build_a5_pyramid <- function(leaf_cells, df, data_resolution, lod_step,
                              aggregate, min_lod = 2L) {
@@ -77,307 +84,238 @@ build_a5_pyramid <- function(leaf_cells, df, data_resolution, lod_step,
   min_lod <- as.integer(min_lod)
   aggregate <- match.arg(aggregate, c("rep_child", "mean"))
 
-  has_rgba <- "_fill_r" %in% names(df)
-  has_fill_value <- "_fill_value" %in% names(df)
-  has_elev <- "_elevation" %in% names(df)
-
-  agg_cols <- character()
-  if (has_rgba) agg_cols <- c(agg_cols, "_fill_r", "_fill_g", "_fill_b", "_fill_a")
-  if (has_fill_value) agg_cols <- c(agg_cols, "_fill_value")
-  if (has_elev) agg_cols <- c(agg_cols, "_elevation")
-
-  payload_cols <- agg_cols
-  cols_order <- c("pentagon", "_lod", payload_cols)
+  agg_cols <- intersect(
+    c("_fill_r", "_fill_g", "_fill_b", "_fill_a", "_fill_value", "_elevation"),
+    names(df)
+  )
+  has_rgba <- "_fill_r" %in% agg_cols
+  cols_order <- c("cell", "_lod", agg_cols)
 
   leaf_rows <- df[, intersect(cols_order, names(df)), drop = FALSE]
+  leaf_rows[["cell"]] <- leaf_cells
   leaf_rows[["_lod"]] <- data_resolution
   leaf_rows <- leaf_rows[, cols_order, drop = FALSE]
 
-  no_payload <- length(agg_cols) == 0L
-
-  if (data_resolution <= min_lod || lod_step < 1L) {
-    return(list(
-      data = leaf_rows,
-      cells = leaf_cells,
-      lod_resolutions = data_resolution
-    ))
+  parent_lods <- integer()
+  if (data_resolution > min_lod && lod_step >= 1L) {
+    parent_lods <- seq.int(data_resolution - lod_step, min_lod, by = -lod_step)
+    parent_lods <- parent_lods[parent_lods >= min_lod]
   }
-
-  parent_lods <- seq.int(data_resolution - lod_step, min_lod, by = -lod_step)
-  parent_lods <- parent_lods[parent_lods >= min_lod]
   if (length(parent_lods) == 0L) {
-    return(list(
-      data = leaf_rows,
-      cells = leaf_cells,
-      lod_resolutions = data_resolution
-    ))
+    return(list(data = leaf_rows, lod_resolutions = data_resolution))
   }
 
-  vals <- if (!no_payload) {
-    m <- as.matrix(df[, agg_cols, drop = FALSE])
-    storage.mode(m) <- "double"
-    m
-  } else NULL
+  vals <- NULL
+  if (length(agg_cols) > 0L) {
+    vals <- as.matrix(df[, agg_cols, drop = FALSE])
+    storage.mode(vals) <- "double"
+  }
 
-  pyramid_chunks <- vector("list", length(parent_lods))
-  parent_cell_chunks <- vector("list", length(parent_lods))
-
+  chunks <- vector("list", length(parent_lods))
   for (k in seq_along(parent_lods)) {
     lod <- parent_lods[[k]]
     parents <- a5R::a5_cell_to_parent(leaf_cells, resolution = lod)
-    parent_keys <- format(parents)
-    unique_keys <- unique(parent_keys)
-    parent_factor <- match(parent_keys, unique_keys)
-    n_groups <- length(unique_keys)
+    group <- vctrs::vec_group_id(parents)
+    n_groups <- attr(group, "n")
 
-    if (no_payload) {
-      pick_idx <- match(seq_len(n_groups), parent_factor)
-      out <- data.frame(
-        pentagon = unique_keys,
-        `_lod` = as.integer(lod),
-        check.names = FALSE,
-        stringsAsFactors = FALSE
-      )
-      out <- out[, cols_order, drop = FALSE]
-      pyramid_chunks[[k]] <- out
-      parent_cell_chunks[[k]] <- parents[pick_idx]
-      next
-    }
-
-    if (aggregate == "mean") {
-      sums <- rowsum(vals, parent_factor, reorder = FALSE, na.rm = TRUE)
-      # rowsum(reorder = FALSE) keeps the order in which groups are
-      # first seen, which matches our parent_factor numbering.
-      counts <- tabulate(parent_factor, nbins = n_groups)
-      means <- sums / counts
-      out <- as.data.frame(means)
-      names(out) <- agg_cols
-      pick_idx <- match(seq_len(n_groups), parent_factor)
+    if (is.null(vals)) {
+      # No payload: one row per parent, taken from its first child.
+      pick_idx <- match(seq_len(n_groups), group)
+      out <- data.frame(row.names = seq_len(n_groups))
     } else {
-      sums <- rowsum(vals, parent_factor, reorder = FALSE, na.rm = TRUE)
-      counts <- tabulate(parent_factor, nbins = n_groups)
+      sums <- rowsum(vals, group, reorder = FALSE, na.rm = TRUE)
+      # rowsum(reorder = FALSE) keeps first-seen order, which matches
+      # vec_group_id numbering.
+      counts <- tabulate(group, nbins = n_groups)
       means <- sums / counts
-      means_per_leaf <- means[parent_factor, , drop = FALSE]
-      diffs <- vals - means_per_leaf
-      sq_dist <- rowSums(diffs * diffs)
-      ord <- order(parent_factor, sq_dist)
-      sorted_factor <- parent_factor[ord]
-      pick_idx <- ord[!duplicated(sorted_factor)]
-      # pick_idx[i] is the leaf row chosen for parent group i
-      out <- df[pick_idx, agg_cols, drop = FALSE]
-      rownames(out) <- NULL
+      if (aggregate == "mean") {
+        pick_idx <- match(seq_len(n_groups), group)
+        out <- as.data.frame(means)
+        names(out) <- agg_cols
+      } else {
+        diffs <- vals - means[group, , drop = FALSE]
+        sq_dist <- rowSums(diffs * diffs)
+        ord <- order(group, sq_dist)
+        # First row of each group in (group, distance) order is the
+        # child closest to its parent's mean.
+        pick_idx <- ord[!duplicated(group[ord])]
+        out <- df[pick_idx, agg_cols, drop = FALSE]
+        rownames(out) <- NULL
+      }
+      if (has_rgba) {
+        for (ch in c("_fill_r", "_fill_g", "_fill_b", "_fill_a")) {
+          out[[ch]] <- as.integer(round(pmin(255, pmax(0, out[[ch]]))))
+        }
+      }
     }
 
-    if (has_rgba) {
-      out[["_fill_r"]] <- as.integer(round(pmin(255, pmax(0, out[["_fill_r"]]))))
-      out[["_fill_g"]] <- as.integer(round(pmin(255, pmax(0, out[["_fill_g"]]))))
-      out[["_fill_b"]] <- as.integer(round(pmin(255, pmax(0, out[["_fill_b"]]))))
-      out[["_fill_a"]] <- as.integer(round(pmin(255, pmax(0, out[["_fill_a"]]))))
-    }
-
-    parent_cells_for_groups <- parents[pick_idx]
-    out[["pentagon"]] <- format(parent_cells_for_groups)
+    out[["cell"]] <- parents[pick_idx]
     out[["_lod"]] <- as.integer(lod)
-    out <- out[, cols_order, drop = FALSE]
-
-    pyramid_chunks[[k]] <- out
-    parent_cell_chunks[[k]] <- parent_cells_for_groups
+    chunks[[k]] <- out[, cols_order, drop = FALSE]
   }
 
-  all_data <- do.call(rbind, c(list(leaf_rows), pyramid_chunks))
-  all_cells <- do.call(c, c(list(leaf_cells), parent_cell_chunks))
-
   list(
-    data = all_data,
-    cells = all_cells,
+    data = vctrs::vec_rbind(leaf_rows, !!!chunks),
     lod_resolutions = sort(c(data_resolution, parent_lods))
   )
 }
 
-#' Serialise a pyramid table to base64-encoded parquet bytes
+#' Serialise a pyramid table to parquet with a spatial row-group index
 #'
-#' Sorts the pyramid by `(_lod ASC, pentagon ASC)`, writes parquet with a
-#' fixed `chunk_size` (one row group per chunk), and stuffs a JSON
-#' index of per-row-group `{rg, lod_min, lod_max, west, south, east, north}`
-#' into the schema's KV metadata. The JS side reads this index up-front
-#' and decodes only the row groups whose LOD matches the picked LOD and
-#' whose bbox overlaps the viewport.
+#' Row groups are planned per LOD: small LODs collapse to one row group,
+#' large LODs are bucketed by the parent cell at `lod - pivot_offset` so
+#' each row group covers a compact region. A JSON index of per-row-group
+#' `{rg, lod_min, lod_max, west, south, east, north, tile_id?}` is stored
+#' in the schema KV metadata; the browser reads it up front and decodes
+#' only the row groups whose LOD matches and whose bbox overlaps the
+#' viewport.
 #'
-#' Cell IDs are emitted as zero-padded fixed-width hex via
-#' `a5R::a5_cell_to_arrow`, so a lexicographic sort on the hex column
-#' matches the underlying uint64 ordering.
+#' Row-group bboxes come from cell centroids padded by the cell edge
+#' length at that LOD, which is equivalent to a boundary bbox for
+#' culling and far cheaper to compute.
 #'
-#' @param pdf Pyramid data frame (must contain `pentagon`, `_lod`).
-#' @param arrow_cells `a5_cell` vector aligned to `pdf` rows.
+#' @param pdf Pyramid data frame with `cell` (`a5_cell`), `_lod` and the
+#'   payload columns.
 #' @param has_fill_value,has_rgba_cols,extruded Schema flags.
-#' @param row_group_size Integer. Rows per parquet row group.
-#' @param path Destination path for the parquet file. When `NULL`
-#'   (default), a tempfile is used and unlinked on exit; the bytes are
-#'   read back and returned as base64 for inline transfer to the
-#'   browser. When supplied, the file is written to that path and
-#'   left in place; no base64 is returned.
+#' @param row_group_size Integer. Cap on rows per parquet row group.
+#' @param pivot_offset Integer. Tile bucketing: rows at `lod` are grouped
+#'   by their parent at `lod - pivot_offset`. A5 cells have four
+#'   children, so `5` gives up to 1024 rows per row group.
+#' @param path Destination path for the parquet file. Encoding for the
+#'   browser (inline base64 or a served URL) is `parquet_payload()`'s
+#'   job.
 #' @param meta Optional named list of additional KV metadata entries
 #'   to embed in the parquet schema (one entry per name; values must
 #'   be JSON-serialisable). Used by [a5_build_pyramid()] /
 #'   [a5_view_pyramid()] to round-trip view-time defaults that are
 #'   normally derived from the source data frame.
-#' @return List `list(b64, n_row_groups, path)`. `b64` is `NULL` when
-#'   `path` was supplied.
+#' @return `list(n_row_groups, path)`, invisibly.
 #' @noRd
-serialise_pyramid_to_parquet <- function(pdf, arrow_cells,
+serialise_pyramid_to_parquet <- function(pdf, path,
                                          has_fill_value, has_rgba_cols,
                                          extruded,
                                          row_group_size = 10000L,
-                                         pivot_offset = 4L,
+                                         pivot_offset = 5L,
                                          min_lod = 2L,
-                                         path = NULL,
                                          meta = NULL) {
   row_group_size <- as.integer(row_group_size)
   pivot_offset <- as.integer(pivot_offset)
   min_lod <- as.integer(min_lod)
+  cells <- pdf[["cell"]]
+  lods <- pdf[["_lod"]]
 
-  # Plan row groups per LOD. Goals: low LODs collapse to one tiny row
-  # group (wide-zoom initial paint = decode <1k rows). High LODs that
-  # exceed row_group_size are bucketed by parent at (lod - pivot_offset)
-  # so each row group has a tight regional bbox; JS-side viewport
-  # pruning then decodes only the parents intersecting the view.
-  #
-  # We collect a list of "row index" vectors, one per row group, each
-  # indexing into the input pdf+arrow_cells. After planning we permute
-  # the table so each plan entry maps to a contiguous slice.
-  unique_lods <- sort(unique(pdf[["_lod"]]))
+  # Plan row groups as lists of row indices into pdf, with the LOD and
+  # optional tile id (hex of the bucketing parent) per group.
+  chunk_indices <- function(idx, size) {
+    if (length(idx) <= size) return(list(idx))
+    starts <- seq.int(1L, length(idx), by = size)
+    lapply(starts, function(st) idx[st:min(length(idx), st + size - 1L)])
+  }
   plan_indices <- list()
-  plan_lods <- integer(0)
-  plan_tile_ids <- character(0)  # NA_character_ for non-tiled row groups
-  for (lod in unique_lods) {
-    lod_idx <- which(pdf[["_lod"]] == lod)
-    n_lod <- length(lod_idx)
-    if (n_lod <= row_group_size) {
-      plan_indices[[length(plan_indices) + 1L]] <- lod_idx
-      plan_lods <- c(plan_lods, lod)
-      plan_tile_ids <- c(plan_tile_ids, NA_character_)
-      next
-    }
+  plan_lods <- integer()
+  plan_tile_ids <- character()
+  for (lod in sort(unique(lods))) {
+    lod_idx <- which(lods == lod)
     parent_lod <- max(min_lod, lod - pivot_offset)
-    if (parent_lod >= lod) {
-      # Pivot collapses to current LOD: no spatial bucketing possible,
-      # fall back to row_group_size chunks (and no tile_id either).
-      starts_in_lod <- seq.int(1L, n_lod, by = row_group_size)
-      for (s in starts_in_lod) {
-        e <- min(n_lod, s + row_group_size - 1L)
-        plan_indices[[length(plan_indices) + 1L]] <- lod_idx[s:e]
-        plan_lods <- c(plan_lods, lod)
-        plan_tile_ids <- c(plan_tile_ids, NA_character_)
-      }
-      next
-    }
-    parents <- a5R::a5_cell_to_parent(arrow_cells[lod_idx], resolution = parent_lod)
-    parent_keys <- format(parents)
-    by_parent <- split(lod_idx, parent_keys)
-    parent_names <- names(by_parent)
-    for (i in seq_along(by_parent)) {
-      group_rows <- by_parent[[i]]
-      tile_id <- parent_names[[i]]
-      n <- length(group_rows)
-      if (n <= row_group_size) {
-        plan_indices[[length(plan_indices) + 1L]] <- group_rows
-        plan_lods <- c(plan_lods, lod)
-        plan_tile_ids <- c(plan_tile_ids, tile_id)
-      } else {
-        starts <- seq.int(1L, n, by = row_group_size)
-        for (s in starts) {
-          e <- min(n, s + row_group_size - 1L)
-          plan_indices[[length(plan_indices) + 1L]] <- group_rows[s:e]
-          plan_lods <- c(plan_lods, lod)
-          plan_tile_ids <- c(plan_tile_ids, tile_id)
-        }
+    if (length(lod_idx) <= row_group_size || parent_lod >= lod) {
+      pieces <- chunk_indices(lod_idx, row_group_size)
+      tile_ids <- rep(NA_character_, length(pieces))
+    } else {
+      parents <- a5R::a5_cell_to_parent(cells[lod_idx], resolution = parent_lod)
+      group <- vctrs::vec_group_id(parents)
+      by_parent <- split(lod_idx, group)
+      parent_hex <- format(parents[match(seq_len(attr(group, "n")), group)])
+      pieces <- list()
+      tile_ids <- character()
+      for (g in seq_along(by_parent)) {
+        sub <- chunk_indices(by_parent[[g]], row_group_size)
+        pieces <- c(pieces, sub)
+        tile_ids <- c(tile_ids, rep(parent_hex[[g]], length(sub)))
       }
     }
+    plan_indices <- c(plan_indices, pieces)
+    plan_lods <- c(plan_lods, rep(as.integer(lod), length(pieces)))
+    plan_tile_ids <- c(plan_tile_ids, tile_ids)
   }
 
-  # Permute the table so each plan entry maps to a contiguous slice.
+  # Permute so each plan entry is a contiguous slice.
   new_order <- unlist(plan_indices, use.names = FALSE)
   pdf <- pdf[new_order, , drop = FALSE]
-  arrow_cells <- arrow_cells[new_order]
+  cells <- cells[new_order]
+  chunk_lengths <- lengths(plan_indices)
+  ends <- cumsum(chunk_lengths)
+  starts <- ends - chunk_lengths + 1L
 
   arrow_tbl <- payload_arrow_table(
-    pdf, arrow_cells,
+    pdf,
     has_lod = TRUE,
     has_fill_value = has_fill_value,
     has_rgba_cols = has_rgba_cols,
     extruded = extruded
   )
 
-  # Now plan_indices' k-th element occupies rows [offsets[k], offsets[k+1]).
-  chunk_lengths <- vapply(plan_indices, length, integer(1L))
-  offsets <- cumsum(c(1L, chunk_lengths))
-  plan <- lapply(seq_along(plan_indices), function(k) {
-    list(start = offsets[k], end = offsets[k] + chunk_lengths[k] - 1L,
-         lod = plan_lods[k])
-  })
-
-  rg_index <- vector("list", length(plan))
-  for (k in seq_along(plan)) {
-    p <- plan[[k]]
-    chunk_cells <- arrow_cells[p$start:p$end]
-    bbox <- unclass(wk::wk_bbox(a5R::a5_cell_to_boundary(chunk_cells)))
-    if (bbox$xmin < -180 || bbox$xmax > 180) {
+  # Row-group bboxes from centroids, padded by the cell edge length at
+  # that LOD (converted to degrees at the group's latitude).
+  xy <- unclass(a5R::a5_cell_to_lonlat(cells))
+  edge_m <- a5R::a5_cell_edge_length_avg(plan_lods)
+  rg_index <- vector("list", length(plan_indices))
+  for (k in seq_along(plan_indices)) {
+    sl <- starts[k]:ends[k]
+    lon <- xy$x[sl]
+    lat <- xy$y[sl]
+    lon_rng <- range(lon)
+    lat_rng <- range(lat)
+    pad_lat <- as.numeric(edge_m[k]) / 111320
+    pad_lon <- pad_lat / max(cos(max(abs(lat_rng)) * pi / 180), 0.05)
+    west <- lon_rng[1] - pad_lon
+    east <- lon_rng[2] + pad_lon
+    if (west < -180 || east > 180 || (east - west) > 180) {
       west <- -180; east <- 180
-    } else {
-      west <- bbox$xmin; east <- bbox$xmax
     }
-    tile_id <- plan_tile_ids[[k]]
     entry <- list(
       rg = as.integer(k - 1L),
-      lod_min = as.integer(p$lod),
-      lod_max = as.integer(p$lod),
-      west  = west,
-      south = max(-90, bbox$ymin),
-      east  = east,
-      north = min(90,  bbox$ymax)
+      lod_min = plan_lods[k],
+      lod_max = plan_lods[k],
+      west = round(west, 5),
+      south = round(max(-90, lat_rng[1] - pad_lat), 5),
+      east = round(east, 5),
+      north = round(min(90, lat_rng[2] + pad_lat), 5)
     )
-    if (!is.na(tile_id)) entry$tile_id <- tile_id
+    if (!is.na(plan_tile_ids[k])) entry$tile_id <- plan_tile_ids[k]
     rg_index[[k]] <- entry
   }
-  rg_meta_json <- yyjsonr::write_json_str(rg_index, auto_unbox = TRUE)
 
-  schema_kv <- list(a5view_row_groups = rg_meta_json)
+  schema_kv <- list(
+    a5view_row_groups = yyjsonr::write_json_str(rg_index, auto_unbox = TRUE)
+  )
   if (!is.null(meta) && length(meta) > 0L) {
     schema_kv$a5view_meta <- yyjsonr::write_json_str(meta, auto_unbox = TRUE)
   }
   arrow_tbl <- arrow_tbl$ReplaceSchemaMetadata(schema_kv)
 
-  caller_supplied_path <- !is.null(path)
-  if (!caller_supplied_path) {
-    path <- tempfile(fileext = ".parquet")
-    on.exit(unlink(path), add = TRUE)
-  }
   sink <- arrow::FileOutputStream$create(path)
   writer <- arrow::ParquetFileWriter$create(
     arrow_tbl$schema, sink,
     properties = arrow::ParquetWriterProperties$create(
-      column_names = names(arrow_tbl)
+      column_names = names(arrow_tbl),
+      compression = "snappy",
+      # Our KV index replaces parquet column statistics, and dictionary
+      # pages cost more than they save on ~1k-row row groups; skipping
+      # both trims per-row-group overhead by about a fifth.
+      write_statistics = FALSE,
+      use_dictionary = FALSE
     )
   )
-  for (p in plan) {
-    sub <- arrow_tbl$Slice(offset = p$start - 1L, length = p$end - p$start + 1L)
-    # chunk_size = nrow forces this slice to land as exactly one row group,
-    # so the row group index above stays 1:1 with the file's row groups.
+  for (k in seq_along(plan_indices)) {
+    sub <- arrow_tbl$Slice(offset = starts[k] - 1L, length = chunk_lengths[k])
+    # chunk_size = nrow forces this slice to land as exactly one row
+    # group, so the index above stays 1:1 with the file's row groups.
     writer$WriteTable(sub, chunk_size = sub$num_rows)
   }
   writer$Close()
   sink$close()
 
-  if (caller_supplied_path) {
-    list(b64 = NULL, n_row_groups = length(plan), path = path)
-  } else {
-    bytes <- readBin(path, "raw", n = file.info(path)$size)
-    list(
-      b64 = base64enc::base64encode(bytes),
-      n_row_groups = length(plan),
-      path = path
-    )
-  }
+  invisible(list(n_row_groups = length(plan_indices), path = path))
 }
 
 #' Read the embedded `a5view_meta` KV entry from a pyramid parquet file
@@ -408,8 +346,13 @@ resolve_elevation_col <- function(cells, elev_expr) {
 }
 
 #' Compute initial view state from cell centroids
+#'
+#' Large inputs are subsampled (evenly, up to `max_cells`) before the
+#' centroid pass; the centre and extent are indistinguishable from the
+#' full computation for the purpose of picking a starting view.
 #' @noRd
-auto_view <- function(hex_ids, lng = NULL, lat = NULL, zoom = NULL) {
+auto_view <- function(cells, lng = NULL, lat = NULL, zoom = NULL,
+                      max_cells = 100000L) {
   if (!is.null(lng) && !is.null(lat) && !is.null(zoom)) {
     return(list(
       longitude = lng,
@@ -420,9 +363,11 @@ auto_view <- function(hex_ids, lng = NULL, lat = NULL, zoom = NULL) {
     ))
   }
 
-  cells <- a5R::a5_cell(hex_ids)
-  coords <- a5R::a5_cell_to_lonlat(cells)
-  xy <- unclass(coords)
+  n <- length(cells)
+  if (n > max_cells) {
+    cells <- cells[unique(as.integer(round(seq(1, n, length.out = max_cells))))]
+  }
+  xy <- unclass(a5R::a5_cell_to_lonlat(cells))
 
   ctr_lng <- if (!is.null(lng)) lng else mean(xy$x, na.rm = TRUE)
   ctr_lat <- if (!is.null(lat)) lat else mean(xy$y, na.rm = TRUE)
@@ -557,15 +502,20 @@ resolve_tooltip_cols <- function(tooltip, prep, aggregate = "none") {
 #'
 #' One place defines the wire schema for both the inline IPC path and
 #' the parquet pyramid path: `pentagon` (fixed-width hex via
-#' `a5R::a5_cell_to_arrow`), optional `_lod`, `_fill_value`,
+#' `a5R::a5_cell_to_arrow` on the `cell` column), optional `_lod`, `_fill_value`,
 #' `_fill_r/g/b/a`, `_elevation`, followed by any extra tooltip columns.
 #' @noRd
-payload_arrow_table <- function(pdf, cells, has_lod, has_fill_value,
+payload_arrow_table <- function(pdf, has_lod, has_fill_value,
                                 has_rgba_cols, extruded, extra = list()) {
   u8 <- function(x) arrow::Array$create(x, type = arrow::uint8())
-  cols <- list(pentagon = a5R::a5_cell_to_arrow(cells))
+  cols <- list(pentagon = a5R::a5_cell_to_arrow(pdf[["cell"]]))
   if (has_lod) cols[["_lod"]] <- u8(pdf[["_lod"]])
-  if (has_fill_value) cols[["_fill_value"]] <- pdf[["_fill_value"]]
+  if (has_fill_value) {
+    # float32 is plenty for a tooltip readout and halves the column.
+    cols[["_fill_value"]] <- arrow::Array$create(
+      pdf[["_fill_value"]], type = arrow::float32()
+    )
+  }
   if (has_rgba_cols) {
     cols[["_fill_r"]] <- u8(pdf[["_fill_r"]])
     cols[["_fill_g"]] <- u8(pdf[["_fill_g"]])
@@ -582,15 +532,18 @@ payload_arrow_table <- function(pdf, cells, has_lod, has_fill_value,
 #' `aggregate = "none"` ships the leaf rows as base64 Arrow IPC.
 #' Otherwise a LOD pyramid is built and serialised to parquet with a
 #' row-group index so the browser decodes only what the viewport
-#' needs.
-#' @return List with `arrow_ipc`, `parquet_b64` (one of which is
-#'   `NULL`) and `lod_resolutions`.
+#' needs. Inside Shiny the parquet file is served over HTTP with Range
+#' support (see `serve_parquet_file()`); elsewhere it is inlined as
+#' base64.
+#' @param session Shiny session or `NULL`.
+#' @return List with `arrow_ipc`, `parquet` (one of which is `NULL`)
+#'   and `lod_resolutions`.
 #' @noRd
 encode_view_data <- function(prep, aggregate, lod_step,
-                             tooltip_cols = character()) {
+                             tooltip_cols = character(), session = NULL) {
   if (aggregate == "none") {
     tbl <- payload_arrow_table(
-      prep$df, prep$leaf_cells,
+      prep$df,
       has_lod = FALSE,
       has_fill_value = prep$has_fill_value,
       has_rgba_cols = prep$has_rgba_cols,
@@ -600,7 +553,7 @@ encode_view_data <- function(prep, aggregate, lod_step,
     ipc_raw <- arrow::write_to_raw(tbl, format = "stream")
     return(list(
       arrow_ipc = base64enc::base64encode(ipc_raw),
-      parquet_b64 = NULL,
+      parquet = NULL,
       lod_resolutions = NULL
     ))
   }
@@ -612,15 +565,16 @@ encode_view_data <- function(prep, aggregate, lod_step,
     lod_step = lod_step,
     aggregate = aggregate
   )
-  pq <- serialise_pyramid_to_parquet(
-    pyramid$data, pyramid$cells,
+  path <- tempfile("a5view-", fileext = ".parquet")
+  serialise_pyramid_to_parquet(
+    pyramid$data, path,
     has_fill_value = prep$has_fill_value,
     has_rgba_cols = prep$has_rgba_cols,
     extruded = prep$extruded
   )
-  list(
-    arrow_ipc = NULL,
-    parquet_b64 = pq$b64,
-    lod_resolutions = as.list(as.integer(pyramid$lod_resolutions))
+  c(
+    list(arrow_ipc = NULL),
+    parquet_payload(path, session = session, temp = TRUE),
+    list(lod_resolutions = as.list(as.integer(pyramid$lod_resolutions)))
   )
 }

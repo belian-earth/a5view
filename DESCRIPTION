@@ -24,11 +24,13 @@ Imports:
     grDevices,
     htmlwidgets,
     rlang (>= 1.0.0),
-    wk,
+    vctrs,
     yyjsonr
 Suggests:
     irlba,
-    testthat (>= 3.0.0)
+    shiny,
+    testthat (>= 3.0.0),
+    wk
 Remotes:
     r-spatial/geoarrowWidget
 Config/testthat/edition: 3
