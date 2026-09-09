@@ -1,31 +1,37 @@
 Package: a5view
 Title: Interactive Map Viewer for A5 Geospatial Cells
-Version: 0.1.0
+Version: 0.2.0
 Authors@R: c(
     person("Hugh", "Graham", role = c("aut", "cre"),
            email = "hugh@belian.earth"),
     person("belian.earth", role = "cph")
     )
 Description: An 'htmlwidgets' viewer that renders 'A5' geospatial index
-    cells on an interactive map using 'deck.gl'. Supports colour mapping,
-    palette selection, basemap switching, opacity control, tooltips and cell
-    borders (among other features).
+    cells on an interactive map using 'deck.gl' over a 'MapLibre' basemap
+    ('OpenFreeMap' vector tiles, no API key). Supports colour mapping with a
+    legend, palette selection, basemap switching, opacity control, hover
+    tooltips, cell borders, a globe projection and precomputed
+    level-of-detail pyramids for large datasets.
 License: Apache License (>= 2)
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.3
 Imports:
-    a5R,
+    a5R (>= 0.6.0),
     arrow,
     base64enc,
     cli,
     geoarrowWidget,
     grDevices,
     htmlwidgets,
-    rlang (>= 1.0.0)
+    rlang (>= 1.0.0),
+    vctrs,
+    yyjsonr
 Suggests:
     irlba,
-    testthat (>= 3.0.0)
+    shiny,
+    testthat (>= 3.0.0),
+    wk
 Remotes:
     r-spatial/geoarrowWidget
 Config/testthat/edition: 3
+Config/roxygen2/version: 8.0.0

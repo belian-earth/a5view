@@ -9,8 +9,11 @@ a5_view_update(
   outputId,
   cells,
   fill = "#74ac90ff",
+  fill_identity = FALSE,
   palette = "Viridis",
-  tooltip = TRUE
+  tooltip = TRUE,
+  aggregate = c("none", "rep_child", "mean"),
+  lod_step = 1L
 )
 }
 \arguments{
@@ -18,16 +21,76 @@ a5_view_update(
 
 \item{outputId}{The output ID of the a5_view widget.}
 
-\item{cells}{An \link[a5R:a5_cell]{a5R::a5_cell} vector or data frame.}
+\item{cells}{An \link[a5R:a5_cell]{a5R::a5_cell} vector, or a data frame / tibble
+containing an \code{a5_cell} column.}
 
-\item{fill}{Fill specification (same as \code{\link[=a5_view]{a5_view()}}).}
+\item{fill}{Fill colour specification. One of:
+\itemize{
+\item A single hex colour string (e.g. \code{"#3388ff"}) for uniform fill.
+\item A numeric vector (same length as cells) mapped to \code{palette}.
+\item A character vector of hex colours (same length as cells) for
+per-cell colours.
+\item An unquoted column name when \code{cells} is a data frame.
+\item An expression evaluated against the columns of \code{cells}, in the
+style of \code{ggplot2::aes()}. This makes the colour helpers
+\code{\link[=cells_rgb]{cells_rgb()}} and \code{\link[=cells_pca_rgb]{cells_pca_rgb()}} usable directly inside the
+call, e.g. \code{a5_view(df, fill = cells_rgb(r, g, b))} or
+\code{a5_view(df, fill = cells_pca_rgb(embedding))}. The helpers tag
+their output so \code{fill_identity} is auto-enabled.
+Default: \code{"#74ac90ff"}.
+}}
 
-\item{palette}{Palette (same as \code{\link[=a5_view]{a5_view()}}).}
+\item{fill_identity}{Logical. When \code{TRUE}, treat \code{fill} values as
+literal colours rather than mapping through \code{palette}. Accepts
+packed RGB integers (\verb{(R << 16) | (G << 8) | B}) or hex colour
+strings. Auto-enabled when \code{fill} is produced by \code{\link[=cells_rgb]{cells_rgb()}} /
+\code{\link[=cells_pca_rgb]{cells_pca_rgb()}} or any vector tagged with
+\code{attr(x, "a5_identity") <- TRUE}. Default: \code{FALSE}.}
 
-\item{tooltip}{Logical, show tooltip.}
+\item{palette}{Colour palette used when \code{fill} is numeric. Either a
+palette name accepted by \code{\link[grDevices:hcl.colors]{grDevices::hcl.colors()}} (e.g.
+\code{"viridis"}, \code{"inferno"}, \code{"plasma"}, \code{"turbo"}, \code{"rocket"}) or
+a character vector of hex colours (at least 2). Default: \code{"Viridis"}.}
+
+\item{tooltip}{Logical, or a character vector of column names from
+\code{cells}. \code{TRUE} (default) shows the hovered cell's id plus its fill
+value when \code{fill} is a numeric mapping. A character vector adds
+those columns to the tooltip (requires \code{aggregate = "none"}).
+\code{FALSE} disables the tooltip. The tooltip only appears over cells
+present in the data (see the section on hover and click below).}
+
+\item{aggregate}{How parent cells are summarised when zooming out.
+One of:
+\itemize{
+\item \code{"none"} (default): no precomputed pyramid. All cells are shipped
+as Arrow IPC and rendered through deck.gl's \code{A5Layer}. Cheapest
+to build, suitable for small to medium datasets.
+\item \code{"rep_child"}: each parent inherits the row of the child whose
+payload (RGBA + optional \code{fill_value}/\code{elevation}) is closest in
+Euclidean distance to its parent's mean. Preserves real values,
+no blending. Use for embedding/RGB visualisations.
+\item \code{"mean"}: each numeric payload column is averaged independently
+within the parent group. Best for scalar fields; blends colours
+in RGB space, which can mute embedding visualisations.
+When set to \code{"rep_child"} or \code{"mean"}, the pyramid is serialised to
+parquet with a spatial row-group index. The browser decodes only
+the row groups intersecting the viewport at the level of detail
+matching the current zoom. Inside Shiny the parquet file is served
+over HTTP with byte-range support, so only the footer and the
+visible row groups are ever transferred; elsewhere it is embedded
+in the widget as base64.
+}}
+
+\item{lod_step}{Integer >= 1, gap between successive precomputed
+LODs (only used when \code{aggregate != "none"}). \code{1} (default)
+precomputes every level from the data resolution down to the
+floor (LOD 2); larger values trade size for fewer levels and more
+visible popping at zoom transitions.}
 }
 \description{
 Sends new cell data to an existing a5_view widget via a Shiny custom
 message, avoiding the full widget teardown/rebuild cycle. Much faster
-for interactive updates.
+for interactive updates. Visual options (opacity, basemap, borders)
+are left as they are; only the data, colours, legend and tooltip
+change.
 }

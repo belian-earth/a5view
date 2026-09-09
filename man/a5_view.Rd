@@ -22,7 +22,9 @@ a5_view(
   zoom = NULL,
   globe = FALSE,
   basemap = c("dark", "light", "osm", "satellite"),
-  draw_polygon = FALSE
+  draw_polygon = FALSE,
+  aggregate = c("none", "rep_child", "mean"),
+  lod_step = 1L
 )
 }
 \arguments{
@@ -42,7 +44,7 @@ style of \code{ggplot2::aes()}. This makes the colour helpers
 call, e.g. \code{a5_view(df, fill = cells_rgb(r, g, b))} or
 \code{a5_view(df, fill = cells_pca_rgb(embedding))}. The helpers tag
 their output so \code{fill_identity} is auto-enabled.
-Default: \code{"#3388ff"}.
+Default: \code{"#74ac90ff"}.
 }}
 
 \item{fill_identity}{Logical. When \code{TRUE}, treat \code{fill} values as
@@ -53,16 +55,20 @@ strings. Auto-enabled when \code{fill} is produced by \code{\link[=cells_rgb]{ce
 \code{attr(x, "a5_identity") <- TRUE}. Default: \code{FALSE}.}
 
 \item{palette}{Colour palette used when \code{fill} is numeric. Either a
-palette name accepted by \code{\link[grDevices:palettes]{grDevices::hcl.colors()}} (e.g.
+palette name accepted by \code{\link[grDevices:hcl.colors]{grDevices::hcl.colors()}} (e.g.
 \code{"viridis"}, \code{"inferno"}, \code{"plasma"}, \code{"turbo"}, \code{"rocket"}) or
-a character vector of hex colours (at least 2). Default: \code{"viridis"}.}
+a character vector of hex colours (at least 2). Default: \code{"Viridis"}.}
 
 \item{opacity}{Numeric scalar, initial layer opacity (0--1). An
 interactive slider is provided in the viewer to adjust at runtime.
-Default: \code{0.6}.}
+Default: \code{0.3}.}
 
-\item{tooltip}{Logical or character vector of column names to show
-on hover. Default: \code{TRUE} (show cell hex ID).}
+\item{tooltip}{Logical, or a character vector of column names from
+\code{cells}. \code{TRUE} (default) shows the hovered cell's id plus its fill
+value when \code{fill} is a numeric mapping. A character vector adds
+those columns to the tooltip (requires \code{aggregate = "none"}).
+\code{FALSE} disables the tooltip. The tooltip only appears over cells
+present in the data (see the section on hover and click below).}
 
 \item{elevation}{Column name for 3D extrusion, or \code{NULL} for flat.}
 
@@ -70,7 +76,7 @@ on hover. Default: \code{TRUE} (show cell hex ID).}
 
 \item{border}{Border (stroke) colour for cell outlines, or \code{NULL}
 for no borders. A single colour string (e.g. \code{"#ffffff"},
-\code{"white"}). Default: \code{NULL}.}
+\code{"white"}). Default: \code{"#74ac9080"}.}
 
 \item{border_width}{Numeric scalar, border width in pixels.
 Default: \code{1}.}
@@ -80,14 +86,15 @@ Default: \code{1}.}
 \item{lng, lat, zoom}{Initial map view. If \code{NULL} (default),
 auto-centres on the cell centroids.}
 
-\item{globe}{Logical. Use a 3D globe projection instead of the
-default Mercator map. Default: \code{FALSE}.}
+\item{globe}{Logical. Use MapLibre's globe projection instead of
+the default Mercator map. Default: \code{FALSE}.}
 
 \item{basemap}{Character vector of basemap styles to make available.
-Options are \code{"dark"}, \code{"light"}, \code{"osm"}, and \code{"satellite"}. The
-first element is shown initially. When multiple basemaps are given,
-an interactive selector is shown. Use \code{"none"} for no basemap.
-Default: all four options.}
+Options are \code{"dark"}, \code{"light"} and \code{"osm"} (OpenFreeMap vector
+tiles; no API key), \code{"satellite"} (Esri World Imagery) and
+\code{"none"}. The first element is shown initially. When more than one
+is given, an interactive selector is shown.
+Default: \code{c("dark", "light", "osm", "satellite")}.}
 
 \item{draw_polygon}{Logical. When \code{TRUE}, adds a "Draw polygon"
 toggle to the controls panel. While draw mode is active, clicks
@@ -95,17 +102,70 @@ place polygon vertices and a double-click closes the polygon.
 On completion, the polygon is emitted to Shiny as a WKT string at
 \verb{input$<id>_polygon_draw}; the drawn outline is held on screen
 until the user toggles draw mode off, presses Escape, or starts a
-new polygon. While draw mode is on, deck.gl's
-double-click-to-zoom is suppressed and cell-pick click events do
-not fire. The widget itself does not visualise which cells fall
-inside the polygon — resolve the WKT server-side (e.g. with
-\code{\link[a5R:a5_grid]{a5R::a5_grid()}}) and update the map fills via \code{\link[=a5_view_update]{a5_view_update()}}.
-Only useful in a Shiny context. Default: \code{FALSE}.}
+new polygon. While draw mode is on, double-click-to-zoom is
+suppressed and cell-pick click events do not fire. The widget
+itself does not visualise which cells fall inside the polygon:
+resolve the WKT server-side (e.g. with
+\code{\link[a5R:a5_polygon_to_cells]{a5R::a5_polygon_to_cells()}}) and update the map fills via
+\code{\link[=a5_view_update]{a5_view_update()}}. Only useful in a Shiny context.
+Default: \code{FALSE}.}
+
+\item{aggregate}{How parent cells are summarised when zooming out.
+One of:
+\itemize{
+\item \code{"none"} (default): no precomputed pyramid. All cells are shipped
+as Arrow IPC and rendered through deck.gl's \code{A5Layer}. Cheapest
+to build, suitable for small to medium datasets.
+\item \code{"rep_child"}: each parent inherits the row of the child whose
+payload (RGBA + optional \code{fill_value}/\code{elevation}) is closest in
+Euclidean distance to its parent's mean. Preserves real values,
+no blending. Use for embedding/RGB visualisations.
+\item \code{"mean"}: each numeric payload column is averaged independently
+within the parent group. Best for scalar fields; blends colours
+in RGB space, which can mute embedding visualisations.
+When set to \code{"rep_child"} or \code{"mean"}, the pyramid is serialised to
+parquet with a spatial row-group index. The browser decodes only
+the row groups intersecting the viewport at the level of detail
+matching the current zoom. Inside Shiny the parquet file is served
+over HTTP with byte-range support, so only the footer and the
+visible row groups are ever transferred; elsewhere it is embedded
+in the widget as base64.
+}}
+
+\item{lod_step}{Integer >= 1, gap between successive precomputed
+LODs (only used when \code{aggregate != "none"}). \code{1} (default)
+precomputes every level from the data resolution down to the
+floor (LOD 2); larger values trade size for fewer levels and more
+visible popping at zoom transitions.}
 }
 \value{
 An htmlwidget.
 }
 \description{
-Renders A5 cells using deck.gl's native A5Layer. Cells are drawn as
-filled pentagons on a basemap.
+Renders A5 cells with deck.gl over a MapLibre basemap. Cells are
+drawn as filled pentagons; the viewer provides a basemap switcher,
+an opacity slider, a legend for numeric fills, hover tooltips, and
+an optional polygon-draw tool.
 }
+\section{Hover, click and Shiny inputs}{
+
+Hover and click only resolve to cells that are present in the data:
+the tooltip, the outline highlight and the Shiny inputs below stay
+empty over parts of the map with no cell. With \code{aggregate = "none"}
+the resolved cell is the leaf cell under the cursor. With a pyramid
+it is the cell at the level of detail currently on screen, so the id
+and value reported are those of the pentagon you can see; zoom in
+to reach the leaf cells.
+
+When rendered in Shiny with output id \verb{<id>}, the widget sets:
+\itemize{
+\item \verb{input$<id>_hover}: hex id of the cell under the cursor (or \code{NULL}).
+\item \verb{input$<id>_click}: hex id of the clicked cell; clicking it again,
+or clicking empty map, clears it.
+\item \verb{input$<id>_cursor}, \verb{input$<id>_click_coord}: \code{list(lng, lat)} of
+the pointer.
+\item \verb{input$<id>_polygon_draw}: WKT of a completed polygon
+(see \code{draw_polygon}).
+}
+}
+

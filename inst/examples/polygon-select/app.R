@@ -7,7 +7,11 @@ a5_set_threads(4)
 resolution <- 4L
 
 # Initial map: a res-4 grid over Europe so the user has cells to draw over.
-init_cells <- a5_grid(c(-25, 30, 45, 70), resolution = resolution)
+init_cells <- a5_polygon_to_cells(
+  wk::rct(-25, 30, 45, 70),
+  resolution = resolution
+) |>
+  a5_uncompact(resolution = resolution)
 
 FILL_SELECTED   <- "#74ac90ff"
 FILL_UNSELECTED <- "#74ac901a"
@@ -119,10 +123,13 @@ server <- function(input, output, session) {
   observeEvent(input$map_polygon_draw, {
     wkt <- input$map_polygon_draw
     new_cells <- tryCatch(
-      a5_grid(wk::wkt(wkt), resolution = resolution),
+      a5_uncompact(
+        a5_polygon_to_cells(wk::wkt(wkt), resolution = resolution),
+        resolution = resolution
+      ),
       error = function(e) {
         showNotification(
-          paste("a5_grid failed:", conditionMessage(e)),
+          paste("a5_polygon_to_cells failed:", conditionMessage(e)),
           type = "error"
         )
         a5_cell(character(0))

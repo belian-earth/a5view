@@ -20,7 +20,7 @@ knitr::opts_chunk$set(
 [![R-CMD-check](https://github.com/belian-earth/a5view/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/belian-earth/a5view/actions/workflows/R-CMD-check.yaml)
 <!-- badges: end -->
 
-Interactive map viewer for [A5](https://a5geo.org) geospatial cells, powered by [deck.gl](https://deck.gl). Renders cells directly in the browser using deck.gl's native A5Layer — no pre-computation of boundaries needed. Intentionally minimal API for fast prototyping and exploration of A5 data. 
+Interactive map viewer for [A5](https://a5geo.org) geospatial cells, powered by [deck.gl](https://deck.gl) over a [MapLibre](https://maplibre.org) basemap. Renders cells directly in the browser using deck.gl's native A5Layer; no pre-computation of boundaries needed. Intentionally minimal API for fast prototyping and exploration of A5 data.
 
 ## Installation
 
@@ -46,13 +46,15 @@ a5_view(disk, fill = a5_cell_distance(cell, disk), palette = "Inferno")
 
 Features:
 
-- Colour mapping from numeric vectors or data frame columns with any `hcl.colors()` palette
-- Interactive basemap selector (dark, light, OSM, satellite)
-- Opacity slider
-- Tooltip with cell ID on click, fill value on hover
+- Colour mapping from numeric vectors or data frame columns with any `hcl.colors()` palette, with an on-map legend
+- Basemaps from [OpenFreeMap](https://openfreemap.org) (dark, light, OSM; no API key) and Esri satellite imagery, with an interactive selector; map labels render above the cells
+- Opacity slider, zoom/compass control, scale bar
+- Hover tooltip with the cell id, fill value and any extra columns (`tooltip = c("col1", "col2")`); click to pin a cell; nothing shows over empty map
 - Cell border styling
 - 3D extrusion via `elevation`
-- Shiny bindings (`a5_viewOutput` / `renderA5_view`)
+- Globe projection (`globe = TRUE`)
+- Precomputed level-of-detail pyramids for large datasets (`aggregate = "rep_child"` / `"mean"`), streamed to the browser as parquet and decoded per viewport; inside Shiny the file is served with HTTP range requests so only the row groups in view are transferred
+- Shiny bindings (`a5_viewOutput` / `renderA5_view`) and in-place updates via `a5_view_update()`
 - Optional polygon-draw toolbar (`draw_polygon = TRUE`) for selecting an
   area of interest
 
@@ -75,7 +77,10 @@ output$map <- renderA5_view({
 })
 
 observeEvent(input$map_polygon_draw, {
-  cells_in_poly <- a5R::a5_grid(wk::wkt(input$map_polygon_draw), resolution = 4L)
+  cells_in_poly <- a5R::a5_polygon_to_cells(
+    wk::wkt(input$map_polygon_draw),
+    resolution = 4L
+  )
   # ... use cells_in_poly, e.g. a5_view_update() with selection-driven fills.
 })
 ```

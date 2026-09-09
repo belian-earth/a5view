@@ -31,9 +31,9 @@ test_that("prepare_data handles bare a5_cell vector", {
   result <- prepare_data(cells)
 
   expect_s3_class(result$data, "data.frame")
-  expect_true("pentagon" %in% names(result$data))
+  expect_true(a5R::is_a5_cell(result$data$cell))
   expect_equal(nrow(result$data), 3)
-  expect_true(all(nchar(result$data$pentagon) == 16))
+  expect_equal(result$a5_cells, cells)
   expect_equal(result$extra, list())
 })
 
@@ -54,8 +54,8 @@ test_that("prepare_data handles data frame with a5_cell column", {
   result <- prepare_data(df)
 
   expect_equal(nrow(result$data), 3)
-  expect_true("pentagon" %in% names(result$data))
-  expect_false("cell" %in% names(result$data))
+  expect_true(a5R::is_a5_cell(result$data$cell))
+  expect_equal(names(result$data), "cell")
   expect_equal(result$extra$value, c(10, 20, 30))
 })
 
@@ -107,32 +107,32 @@ test_that("resolve_elevation_col errors on missing column", {
 # --- guess_zoom ---
 
 test_that("guess_zoom returns 24 for single point", {
-  coords <- data.frame(lon = 0, lat = 0)
-  expect_equal(guess_zoom(coords), 24L)
+  xy <- list(x = 0, y = 0)
+  expect_equal(guess_zoom(xy), 24L)
 })
 
 test_that("guess_zoom returns reasonable zoom for small area", {
-  coords <- data.frame(lon = c(-0.1, 0.1), lat = c(-0.1, 0.1))
-  z <- guess_zoom(coords)
+  xy <- list(x = c(-0.1, 0.1), y = c(-0.1, 0.1))
+  z <- guess_zoom(xy)
   expect_true(z >= 1L && z <= 18L)
   expect_true(z >= 8L)
 })
 
 test_that("guess_zoom returns low zoom for large area", {
-  coords <- data.frame(lon = c(-180, 180), lat = c(-90, 90))
-  z <- guess_zoom(coords)
+  xy <- list(x = c(-180, 180), y = c(-90, 90))
+  z <- guess_zoom(xy)
   expect_equal(z, 1L)
 })
 
 test_that("guess_zoom is bounded between 1 and 24", {
   # Very small span
-  coords <- data.frame(lon = c(0, 0.00001), lat = c(0, 0.00001))
-  z <- guess_zoom(coords)
+  xy <- list(x = c(0, 0.00001), y = c(0, 0.00001))
+  z <- guess_zoom(xy)
   expect_true(z <= 24L)
 
   # Huge span
-  coords <- data.frame(lon = c(-180, 180), lat = c(-90, 90))
-  z <- guess_zoom(coords)
+  xy <- list(x = c(-180, 180), y = c(-90, 90))
+  z <- guess_zoom(xy)
   expect_true(z >= 1L)
 })
 

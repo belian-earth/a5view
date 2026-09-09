@@ -1,7 +1,9 @@
 #' View A5 cells on an interactive map
 #'
-#' Renders A5 cells using deck.gl's native A5Layer. Cells are drawn as
-#' filled pentagons on a basemap.
+#' Renders A5 cells with deck.gl over a MapLibre basemap. Cells are
+#' drawn as filled pentagons; the viewer provides a basemap switcher,
+#' an opacity slider, a legend for numeric fills, hover tooltips, and
+#' an optional polygon-draw tool.
 #'
 #' @param cells An [a5R::a5_cell] vector, or a data frame / tibble
 #'   containing an `a5_cell` column.
@@ -17,7 +19,7 @@
 #'     call, e.g. `a5_view(df, fill = cells_rgb(r, g, b))` or
 #'     `a5_view(df, fill = cells_pca_rgb(embedding))`. The helpers tag
 #'     their output so `fill_identity` is auto-enabled.
-#'   Default: `"#3388ff"`.
+#'   Default: `"#74ac90ff"`.
 #' @param fill_identity Logical. When `TRUE`, treat `fill` values as
 #'   literal colours rather than mapping through `palette`. Accepts
 #'   packed RGB integers (`(R << 16) | (G << 8) | B`) or hex colour
@@ -27,42 +29,90 @@
 #' @param palette Colour palette used when `fill` is numeric. Either a
 #'   palette name accepted by [grDevices::hcl.colors()] (e.g.
 #'   `"viridis"`, `"inferno"`, `"plasma"`, `"turbo"`, `"rocket"`) or
-#'   a character vector of hex colours (at least 2). Default: `"viridis"`.
+#'   a character vector of hex colours (at least 2). Default: `"Viridis"`.
 #' @param opacity Numeric scalar, initial layer opacity (0--1). An
 #'   interactive slider is provided in the viewer to adjust at runtime.
-#'   Default: `0.6`.
-#' @param tooltip Logical or character vector of column names to show
-#'   on hover. Default: `TRUE` (show cell hex ID).
+#'   Default: `0.3`.
+#' @param tooltip Logical, or a character vector of column names from
+#'   `cells`. `TRUE` (default) shows the hovered cell's id plus its fill
+#'   value when `fill` is a numeric mapping. A character vector adds
+#'   those columns to the tooltip (requires `aggregate = "none"`).
+#'   `FALSE` disables the tooltip. The tooltip only appears over cells
+#'   present in the data (see the section on hover and click below).
 #' @param elevation Column name for 3D extrusion, or `NULL` for flat.
 #' @param elevation_scale Numeric scalar, scale factor for elevation.
 #' @param border Border (stroke) colour for cell outlines, or `NULL`
 #'   for no borders. A single colour string (e.g. `"#ffffff"`,
-#'   `"white"`). Default: `NULL`.
+#'   `"white"`). Default: `"#74ac9080"`.
 #' @param border_width Numeric scalar, border width in pixels.
 #'   Default: `1`.
 #' @param width,height Widget dimensions. Default: `NULL` (fills container).
 #' @param lng,lat,zoom Initial map view. If `NULL` (default),
 #'   auto-centres on the cell centroids.
-#' @param globe Logical. Use a 3D globe projection instead of the
-#'   default Mercator map. Default: `FALSE`.
+#' @param globe Logical. Use MapLibre's globe projection instead of
+#'   the default Mercator map. Default: `FALSE`.
 #' @param basemap Character vector of basemap styles to make available.
-#'   Options are `"dark"`, `"light"`, `"osm"`, and `"satellite"`. The
-#'   first element is shown initially. When multiple basemaps are given,
-#'   an interactive selector is shown. Use `"none"` for no basemap.
-#'   Default: all four options.
+#'   Options are `"dark"`, `"light"` and `"osm"` (OpenFreeMap vector
+#'   tiles; no API key), `"satellite"` (Esri World Imagery) and
+#'   `"none"`. The first element is shown initially. When more than one
+#'   is given, an interactive selector is shown.
+#'   Default: `c("dark", "light", "osm", "satellite")`.
 #' @param draw_polygon Logical. When `TRUE`, adds a "Draw polygon"
 #'   toggle to the controls panel. While draw mode is active, clicks
 #'   place polygon vertices and a double-click closes the polygon.
 #'   On completion, the polygon is emitted to Shiny as a WKT string at
 #'   `input$<id>_polygon_draw`; the drawn outline is held on screen
 #'   until the user toggles draw mode off, presses Escape, or starts a
-#'   new polygon. While draw mode is on, deck.gl's
-#'   double-click-to-zoom is suppressed and cell-pick click events do
-#'   not fire. The widget itself does not visualise which cells fall
-#'   inside the polygon — resolve the WKT server-side (e.g. with
-#'   [a5R::a5_grid()]) and update the map fills via [a5_view_update()].
-#'   Only useful in a Shiny context. Default: `FALSE`.
+#'   new polygon. While draw mode is on, double-click-to-zoom is
+#'   suppressed and cell-pick click events do not fire. The widget
+#'   itself does not visualise which cells fall inside the polygon:
+#'   resolve the WKT server-side (e.g. with
+#'   [a5R::a5_polygon_to_cells()]) and update the map fills via
+#'   [a5_view_update()]. Only useful in a Shiny context.
+#'   Default: `FALSE`.
+#' @param aggregate How parent cells are summarised when zooming out.
+#'   One of:
+#'   - `"none"` (default): no precomputed pyramid. All cells are shipped
+#'     as Arrow IPC and rendered through deck.gl's `A5Layer`. Cheapest
+#'     to build, suitable for small to medium datasets.
+#'   - `"rep_child"`: each parent inherits the row of the child whose
+#'     payload (RGBA + optional `fill_value`/`elevation`) is closest in
+#'     Euclidean distance to its parent's mean. Preserves real values,
+#'     no blending. Use for embedding/RGB visualisations.
+#'   - `"mean"`: each numeric payload column is averaged independently
+#'     within the parent group. Best for scalar fields; blends colours
+#'     in RGB space, which can mute embedding visualisations.
+#'   When set to `"rep_child"` or `"mean"`, the pyramid is serialised to
+#'   parquet with a spatial row-group index. The browser decodes only
+#'   the row groups intersecting the viewport at the level of detail
+#'   matching the current zoom. Inside Shiny the parquet file is served
+#'   over HTTP with byte-range support, so only the footer and the
+#'   visible row groups are ever transferred; elsewhere it is embedded
+#'   in the widget as base64.
+#' @param lod_step Integer >= 1, gap between successive precomputed
+#'   LODs (only used when `aggregate != "none"`). `1` (default)
+#'   precomputes every level from the data resolution down to the
+#'   floor (LOD 2); larger values trade size for fewer levels and more
+#'   visible popping at zoom transitions.
 #' @returns An htmlwidget.
+#'
+#' @section Hover, click and Shiny inputs:
+#' Hover and click only resolve to cells that are present in the data:
+#' the tooltip, the outline highlight and the Shiny inputs below stay
+#' empty over parts of the map with no cell. With `aggregate = "none"`
+#' the resolved cell is the leaf cell under the cursor. With a pyramid
+#' it is the cell at the level of detail currently on screen, so the id
+#' and value reported are those of the pentagon you can see; zoom in
+#' to reach the leaf cells.
+#'
+#' When rendered in Shiny with output id `<id>`, the widget sets:
+#' - `input$<id>_hover`: hex id of the cell under the cursor (or `NULL`).
+#' - `input$<id>_click`: hex id of the clicked cell; clicking it again,
+#'   or clicking empty map, clears it.
+#' - `input$<id>_cursor`, `input$<id>_click_coord`: `list(lng, lat)` of
+#'   the pointer.
+#' - `input$<id>_polygon_draw`: WKT of a completed polygon
+#'   (see `draw_polygon`).
 #'
 #' @export
 a5_view <- function(
@@ -83,176 +133,54 @@ a5_view <- function(
   zoom = NULL,
   globe = FALSE,
   basemap = c("dark", "light", "osm", "satellite"),
-  draw_polygon = FALSE
+  draw_polygon = FALSE,
+  aggregate = c("none", "rep_child", "mean"),
+  lod_step = 1L
 ) {
-  # --- Validate all arguments ---
+  aggregate <- match.arg(aggregate)
   check_cells(cells)
-  check_number_decimal(opacity, min = 0, max = 1, arg = "opacity")
+  check_view_options(
+    opacity, border, border_width, width, height, lng, lat, zoom,
+    globe, basemap, tooltip, draw_polygon
+  )
   check_number_decimal(elevation_scale, min = 0, arg = "elevation_scale")
-  check_number_decimal(border_width, min = 0, arg = "border_width")
-  check_optional_number(lng, "lng")
-  check_optional_number(lat, "lat")
-  check_optional_number(zoom, "zoom")
-  check_optional_dimension(width, "width")
-  check_optional_dimension(height, "height")
-  check_border(border)
-  if (!rlang::is_bool(globe)) {
-    cli::cli_abort("{.arg globe} must be {.val TRUE} or {.val FALSE}.")
-  }
-  check_basemap(basemap)
-  check_tooltip(tooltip)
   check_palette(palette)
-  check_draw_polygon(draw_polygon)
-  if (!rlang::is_bool(fill_identity)) {
-    cli::cli_abort("{.arg fill_identity} must be {.val TRUE} or {.val FALSE}.")
-  }
+  check_bool(fill_identity, "fill_identity")
+  lod_step <- check_lod_step(lod_step)
 
-  # --- Resolve fill and elevation (NSE) ---
   fill_quo <- rlang::enquo(fill)
-  fill_expr <- rlang::quo_get_expr(fill_quo)
-  elev_expr <- substitute(elevation)
-
-  # aes()-style: when fill is a call and cells is a data frame, evaluate
-  # the call against the columns of cells as a data mask. Bare names and
-  # literal vectors fall through to the existing resolution paths.
-  if (is.call(fill_expr) && is.data.frame(cells)) {
-    fill <- rlang::eval_tidy(fill_quo, data = cells)
-  }
-
-  n_cells <- if (a5R::is_a5_cell(cells)) length(cells) else nrow(cells)
-  fill_resolved <- resolve_fill(cells, fill, fill_expr, n_cells)
-
-  # Auto-flip fill_identity when fill is tagged "a5_identity" — this lets
-  # cells_rgb() / cells_pca_rgb() (and any column tagged the same way)
-  # render as packed RGB without a manual fill_identity = TRUE.
-  if (!fill_identity && has_identity_tag(cells, fill_resolved)) {
-    fill_identity <- TRUE
-  }
-
-  # --- Identity fill: convert column/numeric values to literal colours ---
-  if (fill_identity) {
-    if (fill_resolved$type == "column") {
-      fill_resolved$identity <- TRUE
-    } else if (fill_resolved$type == "numeric") {
-      fill_resolved$type <- "identity"
-    } else if (fill_resolved$type == "colors") {
-      # Already hex colour strings — identity is a no-op, pass through
-    } else {
-      cli::cli_abort(
-        "{.code fill_identity = TRUE} requires {.arg fill} to be a numeric vector, hex colour vector, or column name."
-      )
-    }
-  }
-
-  elev_col <- resolve_elevation_col(cells, elev_expr)
-
-  # --- Prepare data ---
-  prepared <- prepare_data(cells)
-  df <- prepared$data
-
-  if (nrow(df) == 0L) {
+  prep <- prepare_view_data(
+    cells = cells,
+    fill_quo = fill_quo,
+    fill_identity = fill_identity,
+    palette = palette,
+    elev_expr = substitute(elevation)
+  )
+  if (is.null(prep)) {
     cli::cli_abort("No non-NA cells to display.")
   }
 
-  # --- Validate tooltip columns against available data ---
-  if (is.character(tooltip)) {
-    avail <- c(names(df), names(prepared$extra))
-    bad_tt <- setdiff(tooltip, avail)
-    if (length(bad_tt) > 0) {
-      cli::cli_abort(
-        "{.arg tooltip} column{?s} not found: {.val {bad_tt}}. Available: {.val {avail}}."
-      )
-    }
-  }
-
-  # --- Attach fill, elevation, tooltip data ---
-  fill_payload <- attach_fill(df, fill_resolved, prepared, palette)
-  df <- fill_payload$df
-
-  extruded <- !is.null(elev_col)
-  if (extruded) {
-    elev_vals <- prepared$extra[[elev_col]] %||% df[[elev_col]]
-    if (!is.numeric(elev_vals)) {
-      cli::cli_abort(
-        "Elevation column {.val {elev_col}} must be numeric, not {.obj_type_friendly {elev_vals}}."
-      )
-    }
-    df[["_elevation"]] <- as.numeric(elev_vals)
-  }
-
-  pickable <- !isFALSE(tooltip)
-  has_fill_value <- "_fill_value" %in% names(df)
-
-  # --- Auto-center view ---
-  view_state <- auto_view(df[["pentagon"]], lng, lat, zoom)
-
-  # --- Build Arrow IPC as base64 for inline transfer ---
-  arrow_cols <- list(pentagon = a5R::a5_cell_to_arrow(prepared$a5_cells))
-  if (has_fill_value) {
-    arrow_cols[["_fill_value"]] <- df[["_fill_value"]]
-  }
-  has_rgba_cols <- "_fill_r" %in% names(df)
-  has_per_cell_rgba <- "_fill_rgba" %in% names(df)
-  if (has_rgba_cols) {
-    # Pre-computed RGBA as uint8 (0-255 fits in 1 byte, not 4)
-    arrow_cols[["_fill_r"]] <- arrow::Array$create(df[["_fill_r"]], type = arrow::uint8())
-    arrow_cols[["_fill_g"]] <- arrow::Array$create(df[["_fill_g"]], type = arrow::uint8())
-    arrow_cols[["_fill_b"]] <- arrow::Array$create(df[["_fill_b"]], type = arrow::uint8())
-    arrow_cols[["_fill_a"]] <- arrow::Array$create(df[["_fill_a"]], type = arrow::uint8())
-  } else if (has_per_cell_rgba) {
-    rgba_mat <- do.call(rbind, df[["_fill_rgba"]])
-    arrow_cols[["_fill_r"]] <- arrow::Array$create(as.integer(rgba_mat[, 1]), type = arrow::uint8())
-    arrow_cols[["_fill_g"]] <- arrow::Array$create(as.integer(rgba_mat[, 2]), type = arrow::uint8())
-    arrow_cols[["_fill_b"]] <- arrow::Array$create(as.integer(rgba_mat[, 3]), type = arrow::uint8())
-    arrow_cols[["_fill_a"]] <- arrow::Array$create(as.integer(rgba_mat[, 4]), type = arrow::uint8())
-  }
-  if (extruded) {
-    arrow_cols[["_elevation"]] <- df[["_elevation"]]
-  }
-  arrow_tbl <- do.call(arrow::arrow_table, arrow_cols)
-  ipc_raw <- arrow::write_to_raw(arrow_tbl, format = "stream")
-  arrow_b64 <- base64enc::base64encode(ipc_raw)
-
-  # --- JSON payload: base64 Arrow IPC + metadata ---
-  payload <- list(
-    arrow_ipc = arrow_b64,
-    fill_is_column = fill_payload$fill_is_column,
-    fill_color = fill_payload$fill_color,
-    fill_per_cell = has_rgba_cols || has_per_cell_rgba,
-    palette = fill_payload$js_palette,
-    domain = fill_payload$domain,
-    opacity = opacity,
-    extruded = extruded,
-    elevation_scale = elevation_scale,
-    pickable = pickable,
-    tooltip = !isFALSE(tooltip),
-    has_fill_value = has_fill_value,
-    stroked = !is.null(border),
-    line_color = if (!is.null(border)) hex_to_rgba(border) else NULL,
-    line_width = border_width,
-    view_state = view_state,
-    globe = globe,
-    basemaps = as.list(basemap),
-    draw_polygon = draw_polygon
+  tooltip_cols <- resolve_tooltip_cols(tooltip, prep, aggregate)
+  data <- encode_view_data(
+    prep, aggregate, lod_step, tooltip_cols,
+    session = shiny_session()
   )
 
-  widget <- htmlwidgets::createWidget(
-    name = "a5view",
-    x = payload,
-    width = width,
-    height = height,
-    package = "a5view",
-    sizingPolicy = htmlwidgets::sizingPolicy(
-      viewer.padding = 0,
-      viewer.fill = TRUE,
-      browser.fill = TRUE,
-      browser.padding = 0
+  payload <- c(
+    data,
+    fill_payload(prep, fill_quo, tooltip, tooltip_cols),
+    view_options_payload(
+      opacity, tooltip, border, border_width, globe, basemap, draw_polygon
+    ),
+    list(
+      extruded = prep$extruded,
+      elevation_scale = elevation_scale,
+      view_state = auto_view(prep$leaf_cells, lng, lat, zoom),
+      data_resolution = prep$data_resolution
     )
   )
 
-  # Attach Arrow JS library for decoding
-  widget <- geoarrowWidget::attachArrowDependency(widget)
-  widget
+  new_a5view_widget(payload, width, height)
 }
 
 #' Shiny output binding for a5_view
@@ -289,85 +217,106 @@ renderA5_view <- function(expr, env = parent.frame(), quoted = FALSE) {
 #'
 #' Sends new cell data to an existing a5_view widget via a Shiny custom
 #' message, avoiding the full widget teardown/rebuild cycle. Much faster
-#' for interactive updates.
+#' for interactive updates. Visual options (opacity, basemap, borders)
+#' are left as they are; only the data, colours, legend and tooltip
+#' change.
 #'
 #' @param session The Shiny session object.
 #' @param outputId The output ID of the a5_view widget.
-#' @param cells An [a5R::a5_cell] vector or data frame.
-#' @param fill Fill specification (same as [a5_view()]).
-#' @param palette Palette (same as [a5_view()]).
-#' @param tooltip Logical, show tooltip.
+#' @inheritParams a5_view
 #' @export
 a5_view_update <- function(
   session,
   outputId,
   cells,
   fill = "#74ac90ff",
+  fill_identity = FALSE,
   palette = "Viridis",
-  tooltip = TRUE
+  tooltip = TRUE,
+  aggregate = c("none", "rep_child", "mean"),
+  lod_step = 1L
 ) {
   check_cells(cells)
+  aggregate <- match.arg(aggregate)
+  check_palette(palette)
+  check_tooltip(tooltip)
+  check_bool(fill_identity, "fill_identity")
+  lod_step <- check_lod_step(lod_step)
 
   fill_quo <- rlang::enquo(fill)
-  fill_expr <- rlang::quo_get_expr(fill_quo)
-  if (is.call(fill_expr) && is.data.frame(cells)) {
-    fill <- rlang::eval_tidy(fill_quo, data = cells)
-  }
-  n_cells <- if (a5R::is_a5_cell(cells)) length(cells) else nrow(cells)
-  fill_resolved <- resolve_fill(cells, fill, fill_expr, n_cells)
+  prep <- prepare_view_data(
+    cells = cells,
+    fill_quo = fill_quo,
+    fill_identity = fill_identity,
+    palette = palette
+  )
+  if (is.null(prep)) return(invisible(NULL))
 
-  # Auto-flip identity for tagged outputs (e.g. cells_rgb / cells_pca_rgb).
-  if (has_identity_tag(cells, fill_resolved)) {
-    if (fill_resolved$type == "column") {
-      fill_resolved$identity <- TRUE
-    } else if (fill_resolved$type == "numeric") {
-      fill_resolved$type <- "identity"
-    }
-  }
+  tooltip_cols <- resolve_tooltip_cols(tooltip, prep, aggregate)
+  data <- encode_view_data(
+    prep, aggregate, lod_step, tooltip_cols,
+    session = session
+  )
 
-  prepared <- prepare_data(cells)
-  df <- prepared$data
-
-  if (nrow(df) == 0L) return(invisible(NULL))
-
-  fill_payload <- attach_fill(df, fill_resolved, prepared, palette)
-  df <- fill_payload$df
-  has_fill_value <- "_fill_value" %in% names(df)
-  has_rgba_cols <- "_fill_r" %in% names(df)
-  has_per_cell_rgba <- "_fill_rgba" %in% names(df)
-
-  # Build Arrow IPC
-  arrow_cols <- list(pentagon = a5R::a5_cell_to_arrow(prepared$a5_cells))
-  if (has_fill_value) {
-    arrow_cols[["_fill_value"]] <- df[["_fill_value"]]
-  }
-  if (has_rgba_cols) {
-    arrow_cols[["_fill_r"]] <- arrow::Array$create(df[["_fill_r"]], type = arrow::uint8())
-    arrow_cols[["_fill_g"]] <- arrow::Array$create(df[["_fill_g"]], type = arrow::uint8())
-    arrow_cols[["_fill_b"]] <- arrow::Array$create(df[["_fill_b"]], type = arrow::uint8())
-    arrow_cols[["_fill_a"]] <- arrow::Array$create(df[["_fill_a"]], type = arrow::uint8())
-  } else if (has_per_cell_rgba) {
-    rgba_mat <- do.call(rbind, df[["_fill_rgba"]])
-    arrow_cols[["_fill_r"]] <- arrow::Array$create(as.integer(rgba_mat[, 1]), type = arrow::uint8())
-    arrow_cols[["_fill_g"]] <- arrow::Array$create(as.integer(rgba_mat[, 2]), type = arrow::uint8())
-    arrow_cols[["_fill_b"]] <- arrow::Array$create(as.integer(rgba_mat[, 3]), type = arrow::uint8())
-    arrow_cols[["_fill_a"]] <- arrow::Array$create(as.integer(rgba_mat[, 4]), type = arrow::uint8())
-  }
-  arrow_tbl <- do.call(arrow::arrow_table, arrow_cols)
-  ipc_raw <- arrow::write_to_raw(arrow_tbl, format = "stream")
-  arrow_b64 <- base64enc::base64encode(ipc_raw)
-
-  msg <- list(
-    arrow_ipc = arrow_b64,
-    fill_is_column = fill_payload$fill_is_column,
-    fill_color = fill_payload$fill_color,
-    fill_per_cell = has_rgba_cols || has_per_cell_rgba,
-    palette = fill_payload$js_palette,
-    domain = fill_payload$domain,
-    has_fill_value = has_fill_value,
-    tooltip = !isFALSE(tooltip)
+  msg <- c(
+    data,
+    fill_payload(prep, fill_quo, tooltip, tooltip_cols),
+    list(data_resolution = prep$data_resolution)
   )
 
   session$sendCustomMessage(paste0("a5view-update-", outputId), msg)
   invisible(NULL)
+}
+
+#' Payload fields describing colours, legend and tooltip
+#' @noRd
+fill_payload <- function(prep, fill_quo, tooltip, tooltip_cols) {
+  legend <- prep$legend
+  if (!is.null(legend)) {
+    legend$label <- rlang::as_label(fill_quo)
+  }
+  list(
+    fill_color = prep$fill_color,
+    fill_per_cell = prep$has_rgba_cols,
+    has_fill_value = prep$has_fill_value,
+    legend = legend,
+    tooltip = !isFALSE(tooltip),
+    tooltip_cols = as.list(tooltip_cols)
+  )
+}
+
+#' Payload fields for the visual options shared by a5_view() and
+#' a5_view_pyramid()
+#' @noRd
+view_options_payload <- function(opacity, tooltip, border, border_width,
+                                 globe, basemap, draw_polygon) {
+  list(
+    opacity = opacity,
+    tooltip = !isFALSE(tooltip),
+    stroked = !is.null(border),
+    line_color = if (!is.null(border)) hex_to_rgba(border) else NULL,
+    line_width = border_width,
+    globe = globe,
+    basemaps = as.list(basemap),
+    draw_polygon = draw_polygon
+  )
+}
+
+#' Wrap a payload in the a5view htmlwidget with the Arrow JS dependency
+#' @noRd
+new_a5view_widget <- function(payload, width, height) {
+  widget <- htmlwidgets::createWidget(
+    name = "a5view",
+    x = payload,
+    width = width,
+    height = height,
+    package = "a5view",
+    sizingPolicy = htmlwidgets::sizingPolicy(
+      viewer.padding = 0,
+      viewer.fill = TRUE,
+      browser.fill = TRUE,
+      browser.padding = 0
+    )
+  )
+  geoarrowWidget::attachArrowDependency(widget)
 }
