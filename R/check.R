@@ -19,6 +19,15 @@ check_cells <- function(cells) {
 }
 
 #' @noRd
+check_bool <- function(x, arg = rlang::caller_arg(x)) {
+  if (!rlang::is_bool(x)) {
+    cli::cli_abort(
+      "{.arg {arg}} must be {.val TRUE} or {.val FALSE}, not {.obj_type_friendly {x}}."
+    )
+  }
+}
+
+#' @noRd
 check_number_decimal <- function(
   x,
   min = -Inf,
@@ -38,6 +47,8 @@ check_number_decimal <- function(
       cli::cli_abort("{.arg {arg}} must be between {min} and {max}, not {x}.")
     } else if (is.finite(min)) {
       cli::cli_abort("{.arg {arg}} must be >= {min}, not {x}.")
+    } else {
+      cli::cli_abort("{.arg {arg}} must be <= {max}, not {x}.")
     }
   }
 }
@@ -60,6 +71,21 @@ check_optional_dimension <- function(x, arg) {
       )
     }
   }
+}
+
+#' Validate a colour string, rethrowing col2rgb's error with context
+#' @noRd
+check_colours <- function(x, arg) {
+  tryCatch(
+    grDevices::col2rgb(x),
+    error = function(e) {
+      cli::cli_abort(c(
+        "Invalid colour{?s} in {.arg {arg}}.",
+        "x" = conditionMessage(e)
+      ))
+    }
+  )
+  invisible(x)
 }
 
 #' @noRd
@@ -85,7 +111,7 @@ check_border <- function(border) {
 #' @noRd
 check_basemap <- function(basemap) {
   valid_bm <- c("dark", "light", "osm", "satellite", "none")
-  if (!is.character(basemap)) {
+  if (!is.character(basemap) || length(basemap) == 0L) {
     cli::cli_abort(
       "{.arg basemap} must be a character vector, not {.obj_type_friendly {basemap}}."
     )
@@ -108,12 +134,12 @@ check_tooltip <- function(tooltip) {
 }
 
 #' @noRd
-check_draw_polygon <- function(draw_polygon) {
-  if (!rlang::is_bool(draw_polygon)) {
-    cli::cli_abort(
-      "{.arg draw_polygon} must be {.val TRUE} or {.val FALSE}, not {.obj_type_friendly {draw_polygon}}."
-    )
+check_lod_step <- function(lod_step) {
+  if (!rlang::is_integerish(lod_step, n = 1L) ||
+      is.na(lod_step) || lod_step < 1L) {
+    cli::cli_abort("{.arg lod_step} must be a positive integer.")
   }
+  as.integer(lod_step)
 }
 
 #' @noRd
@@ -130,23 +156,29 @@ check_palette <- function(palette) {
       ))
     }
   } else if (is.character(palette) && length(palette) > 1L) {
-    tryCatch(
-      grDevices::col2rgb(palette),
-      error = function(e) {
-        cli::cli_abort(c(
-          "Invalid colours in {.arg palette}.",
-          "x" = conditionMessage(e)
-        ))
-      }
-    )
-    if (length(palette) < 2L) {
-      cli::cli_abort(
-        "{.arg palette} must contain at least 2 colours when providing a custom palette."
-      )
-    }
+    check_colours(palette, "palette")
   } else {
     cli::cli_abort(
       "{.arg palette} must be a palette name (string) or a character vector of colours, not {.obj_type_friendly {palette}}."
     )
   }
+}
+
+#' Validate the visual options shared by a5_view() and a5_view_pyramid()
+#' @noRd
+check_view_options <- function(opacity, border, border_width, width, height,
+                               lng, lat, zoom, globe, basemap, tooltip,
+                               draw_polygon) {
+  check_number_decimal(opacity, min = 0, max = 1, arg = "opacity")
+  check_number_decimal(border_width, min = 0, arg = "border_width")
+  check_optional_number(lng, "lng")
+  check_optional_number(lat, "lat")
+  check_optional_number(zoom, "zoom")
+  check_optional_dimension(width, "width")
+  check_optional_dimension(height, "height")
+  check_border(border)
+  check_bool(globe, "globe")
+  check_basemap(basemap)
+  check_tooltip(tooltip)
+  check_bool(draw_polygon, "draw_polygon")
 }

@@ -42,21 +42,6 @@ prepare_data <- function(cells) {
   )
 }
 
-#' Materialise a `_fill_rgba` list column into scalar `_fill_r/g/b/a`
-#' columns, so downstream code (pyramid build, Arrow IPC writer) deals
-#' with one shape only.
-#' @noRd
-normalize_rgba_cols <- function(df) {
-  if (!"_fill_rgba" %in% names(df)) return(df)
-  rgba_mat <- do.call(rbind, df[["_fill_rgba"]])
-  df[["_fill_r"]] <- as.integer(rgba_mat[, 1])
-  df[["_fill_g"]] <- as.integer(rgba_mat[, 2])
-  df[["_fill_b"]] <- as.integer(rgba_mat[, 3])
-  df[["_fill_a"]] <- as.integer(rgba_mat[, 4])
-  df[["_fill_rgba"]] <- NULL
-  df
-}
-
 #' Build a pre-aggregated multi-resolution pyramid for a5_view rendering
 #'
 #' Given the leaf-level cells and their per-cell payload (RGBA, optional
@@ -315,18 +300,13 @@ serialise_pyramid_to_parquet <- function(pdf, arrow_cells,
   pdf <- pdf[new_order, , drop = FALSE]
   arrow_cells <- arrow_cells[new_order]
 
-  arrow_cols <- list(pentagon = a5R::a5_cell_to_arrow(arrow_cells))
-  arrow_cols[["_lod"]] <- arrow::Array$create(pdf[["_lod"]], type = arrow::uint8())
-  if (has_fill_value) arrow_cols[["_fill_value"]] <- pdf[["_fill_value"]]
-  if (has_rgba_cols) {
-    arrow_cols[["_fill_r"]] <- arrow::Array$create(pdf[["_fill_r"]], type = arrow::uint8())
-    arrow_cols[["_fill_g"]] <- arrow::Array$create(pdf[["_fill_g"]], type = arrow::uint8())
-    arrow_cols[["_fill_b"]] <- arrow::Array$create(pdf[["_fill_b"]], type = arrow::uint8())
-    arrow_cols[["_fill_a"]] <- arrow::Array$create(pdf[["_fill_a"]], type = arrow::uint8())
-  }
-  if (extruded) arrow_cols[["_elevation"]] <- pdf[["_elevation"]]
-
-  arrow_tbl <- do.call(arrow::arrow_table, arrow_cols)
+  arrow_tbl <- payload_arrow_table(
+    pdf, arrow_cells,
+    has_lod = TRUE,
+    has_fill_value = has_fill_value,
+    has_rgba_cols = has_rgba_cols,
+    extruded = extruded
+  )
 
   # Now plan_indices' k-th element occupies rows [offsets[k], offsets[k+1]).
   chunk_lengths <- vapply(plan_indices, length, integer(1L))
@@ -441,12 +421,13 @@ auto_view <- function(hex_ids, lng = NULL, lat = NULL, zoom = NULL) {
   }
 
   cells <- a5R::a5_cell(hex_ids)
-  coords <- a5R::a5_cell_to_lonlat(cells, normalise = FALSE)
+  coords <- a5R::a5_cell_to_lonlat(cells)
+  xy <- unclass(coords)
 
-  ctr_lng <- if (!is.null(lng)) lng else mean(coords$lon, na.rm = TRUE)
-  ctr_lat <- if (!is.null(lat)) lat else mean(coords$lat, na.rm = TRUE)
+  ctr_lng <- if (!is.null(lng)) lng else mean(xy$x, na.rm = TRUE)
+  ctr_lat <- if (!is.null(lat)) lat else mean(xy$y, na.rm = TRUE)
 
-  z <- if (!is.null(zoom)) zoom else guess_zoom(coords)
+  z <- if (!is.null(zoom)) zoom else guess_zoom(xy)
 
   list(
     longitude = ctr_lng,
@@ -458,10 +439,12 @@ auto_view <- function(hex_ids, lng = NULL, lat = NULL, zoom = NULL) {
 }
 
 #' Guess a reasonable zoom level from coordinate extent
+#' @param xy A list with `x` (longitude) and `y` (latitude) numeric
+#'   vectors, e.g. `unclass()` of a `wk::xy()` object.
 #' @noRd
-guess_zoom <- function(coords) {
-  lng_range <- diff(range(coords$lon, na.rm = TRUE))
-  lat_range <- diff(range(coords$lat, na.rm = TRUE))
+guess_zoom <- function(xy) {
+  lng_range <- diff(range(xy$x, na.rm = TRUE))
+  lat_range <- diff(range(xy$y, na.rm = TRUE))
   span <- max(lng_range, lat_range)
   if (span < 1e-6) {
     return(24L)
@@ -469,4 +452,175 @@ guess_zoom <- function(coords) {
   span <- span * 1.3
   z <- log2(360 / span)
   max(1L, min(24L, floor(z)))
+}
+
+#' Shared data prep (used by a5_view, a5_view_update, a5_build_pyramid)
+#'
+#' Resolves fill, prepares the data frame, attaches per-cell RGBA, and
+#' attaches elevation. Stops short of pyramid construction so the
+#' `aggregate = "none"` path can reuse the same helper.
+#' @param fill_quo Quosure of the `fill` argument (see `resolve_fill()`).
+#' @param elev_expr Substituted `elevation` argument.
+#' @return `NULL` when no non-NA cells remain, else a list with `df`,
+#'   `leaf_cells`, `extra`, `fill_color`, `legend`, `has_fill_value`,
+#'   `has_rgba_cols`, `extruded` and `data_resolution`.
+#' @noRd
+prepare_view_data <- function(cells, fill_quo, fill_identity, palette,
+                              elev_expr = NULL) {
+  n_cells <- if (a5R::is_a5_cell(cells)) length(cells) else nrow(cells)
+  fill_resolved <- resolve_fill(cells, fill_quo, n_cells)
+
+  if (!fill_identity && has_identity_tag(cells, fill_resolved)) {
+    fill_identity <- TRUE
+  }
+  if (fill_identity) {
+    if (fill_resolved$type == "column") {
+      fill_resolved$identity <- TRUE
+    } else if (fill_resolved$type == "numeric") {
+      fill_resolved$type <- "identity"
+    } else if (fill_resolved$type != "colors") {
+      cli::cli_abort(
+        "{.code fill_identity = TRUE} requires {.arg fill} to be a numeric vector, hex colour vector, or column name."
+      )
+    }
+  }
+
+  elev_col <- resolve_elevation_col(cells, elev_expr)
+
+  prepared <- prepare_data(cells)
+  df <- prepared$data
+
+  if (nrow(df) == 0L) {
+    return(NULL)
+  }
+
+  fill <- attach_fill(df, fill_resolved, prepared, palette)
+  df <- fill$df
+
+  extruded <- !is.null(elev_col)
+  if (extruded) {
+    elev_vals <- prepared$extra[[elev_col]]
+    if (!is.numeric(elev_vals)) {
+      cli::cli_abort(
+        "Elevation column {.val {elev_col}} must be numeric, not {.obj_type_friendly {elev_vals}}."
+      )
+    }
+    df[["_elevation"]] <- as.numeric(elev_vals)
+  }
+
+  list(
+    df = df,
+    leaf_cells = prepared$a5_cells,
+    extra = prepared$extra,
+    fill_color = fill$fill_color,
+    legend = fill$legend,
+    has_fill_value = "_fill_value" %in% names(df),
+    has_rgba_cols = "_fill_r" %in% names(df),
+    extruded = extruded,
+    data_resolution = as.integer(a5R::a5_get_resolution(prepared$a5_cells[[1]]))
+  )
+}
+
+#' Resolve the `tooltip` argument to a vector of extra column names
+#'
+#' Columns are shipped verbatim to the browser and shown in the hover
+#' tooltip. Only atomic columns are allowed (list columns such as
+#' embeddings are rejected). Returns `character()` for logical input.
+#' @noRd
+resolve_tooltip_cols <- function(tooltip, prep, aggregate = "none") {
+  if (!is.character(tooltip)) return(character())
+  avail <- names(prep$extra)
+  bad <- setdiff(tooltip, avail)
+  if (length(bad) > 0L) {
+    cli::cli_abort(c(
+      "{.arg tooltip} column{?s} not found: {.val {bad}}.",
+      "i" = "Available columns: {.val {avail}}."
+    ))
+  }
+  non_atomic <- tooltip[!vapply(prep$extra[tooltip], is.atomic, logical(1))]
+  if (length(non_atomic) > 0L) {
+    cli::cli_abort(
+      "{.arg tooltip} column{?s} {.val {non_atomic}} must be atomic (not list columns)."
+    )
+  }
+  if (aggregate != "none" && length(tooltip) > 0L) {
+    cli::cli_warn(c(
+      "{.arg tooltip} columns are only shown when {.code aggregate = \"none\"}.",
+      "i" = "Pyramid renders show the cell id and fill value only."
+    ))
+    return(character())
+  }
+  unique(tooltip)
+}
+
+#' Build the Arrow table shipped to the browser
+#'
+#' One place defines the wire schema for both the inline IPC path and
+#' the parquet pyramid path: `pentagon` (fixed-width hex via
+#' `a5R::a5_cell_to_arrow`), optional `_lod`, `_fill_value`,
+#' `_fill_r/g/b/a`, `_elevation`, followed by any extra tooltip columns.
+#' @noRd
+payload_arrow_table <- function(pdf, cells, has_lod, has_fill_value,
+                                has_rgba_cols, extruded, extra = list()) {
+  u8 <- function(x) arrow::Array$create(x, type = arrow::uint8())
+  cols <- list(pentagon = a5R::a5_cell_to_arrow(cells))
+  if (has_lod) cols[["_lod"]] <- u8(pdf[["_lod"]])
+  if (has_fill_value) cols[["_fill_value"]] <- pdf[["_fill_value"]]
+  if (has_rgba_cols) {
+    cols[["_fill_r"]] <- u8(pdf[["_fill_r"]])
+    cols[["_fill_g"]] <- u8(pdf[["_fill_g"]])
+    cols[["_fill_b"]] <- u8(pdf[["_fill_b"]])
+    cols[["_fill_a"]] <- u8(pdf[["_fill_a"]])
+  }
+  if (extruded) cols[["_elevation"]] <- pdf[["_elevation"]]
+  for (nm in names(extra)) cols[[nm]] <- extra[[nm]]
+  do.call(arrow::arrow_table, cols)
+}
+
+#' Encode prepared view data for transfer to the browser
+#'
+#' `aggregate = "none"` ships the leaf rows as base64 Arrow IPC.
+#' Otherwise a LOD pyramid is built and serialised to parquet with a
+#' row-group index so the browser decodes only what the viewport
+#' needs.
+#' @return List with `arrow_ipc`, `parquet_b64` (one of which is
+#'   `NULL`) and `lod_resolutions`.
+#' @noRd
+encode_view_data <- function(prep, aggregate, lod_step,
+                             tooltip_cols = character()) {
+  if (aggregate == "none") {
+    tbl <- payload_arrow_table(
+      prep$df, prep$leaf_cells,
+      has_lod = FALSE,
+      has_fill_value = prep$has_fill_value,
+      has_rgba_cols = prep$has_rgba_cols,
+      extruded = prep$extruded,
+      extra = prep$extra[tooltip_cols]
+    )
+    ipc_raw <- arrow::write_to_raw(tbl, format = "stream")
+    return(list(
+      arrow_ipc = base64enc::base64encode(ipc_raw),
+      parquet_b64 = NULL,
+      lod_resolutions = NULL
+    ))
+  }
+
+  pyramid <- build_a5_pyramid(
+    leaf_cells = prep$leaf_cells,
+    df = prep$df,
+    data_resolution = prep$data_resolution,
+    lod_step = lod_step,
+    aggregate = aggregate
+  )
+  pq <- serialise_pyramid_to_parquet(
+    pyramid$data, pyramid$cells,
+    has_fill_value = prep$has_fill_value,
+    has_rgba_cols = prep$has_rgba_cols,
+    extruded = prep$extruded
+  )
+  list(
+    arrow_ipc = NULL,
+    parquet_b64 = pq$b64,
+    lod_resolutions = as.list(as.integer(pyramid$lod_resolutions))
+  )
 }

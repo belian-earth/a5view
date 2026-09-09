@@ -240,21 +240,25 @@ has_identity_tag <- function(cells, fill_resolved) {
   !is.null(tagged_value) && isTRUE(attr(tagged_value, "a5_identity"))
 }
 
-#' Resolve fill argument into a typed result
+#' Resolve the `fill` argument into a typed result
+#'
+#' `fill_quo` is the quosure captured by the exported function. A bare
+#' symbol naming a column of `cells` resolves to that column without
+#' being evaluated; anything else is evaluated with the columns of
+#' `cells` (when a data frame) as a data mask, so helpers such as
+#' [cells_rgb()] can reference columns directly and ordinary variables
+#' from the caller's environment still work.
 #' @noRd
-resolve_fill <- function(cells, fill, fill_expr, n_cells) {
-  # Case 1: unquoted column name in a data frame
-  if (is.name(fill_expr) && is.data.frame(cells)) {
-    col <- as.character(fill_expr)
-    if (col %in% names(cells)) {
-      return(list(type = "column", col = col))
-    }
-    cli::cli_abort(
-      "Column {.val {col}} not found in {.arg cells}. Available columns: {.val {names(cells)}}."
-    )
+resolve_fill <- function(cells, fill_quo, n_cells) {
+  expr <- rlang::quo_get_expr(fill_quo)
+  if (is.name(expr) && is.data.frame(cells) &&
+      as.character(expr) %in% names(cells)) {
+    return(list(type = "column", col = as.character(expr)))
   }
 
-  # Case 2: numeric vector — map through palette
+  mask <- if (is.data.frame(cells)) cells else NULL
+  fill <- rlang::eval_tidy(fill_quo, data = mask)
+
   if (is.numeric(fill)) {
     if (length(fill) == 1L) {
       cli::cli_abort(c(
@@ -274,26 +278,16 @@ resolve_fill <- function(cells, fill, fill_expr, n_cells) {
     return(list(type = "numeric", values = fill))
   }
 
-  # Case 3: character vector of colours (length > 1)
   if (is.character(fill) && length(fill) > 1L) {
     if (length(fill) != n_cells) {
       cli::cli_abort(
         "{.arg fill} has length {length(fill)} but {.arg cells} has {n_cells} element{?s}."
       )
     }
-    tryCatch(
-      grDevices::col2rgb(fill),
-      error = function(e) {
-        cli::cli_abort(c(
-          "Invalid colours in {.arg fill}.",
-          "x" = conditionMessage(e)
-        ))
-      }
-    )
+    check_colours(fill, "fill")
     return(list(type = "colors", values = fill))
   }
 
-  # Case 4: single colour string
   if (is.character(fill) && length(fill) == 1L) {
     tryCatch(
       grDevices::col2rgb(fill),
@@ -322,124 +316,101 @@ resolve_palette <- function(palette, n = 8L) {
   }
 }
 
-#' Attach fill data to the data frame and return JS payload components
-#' @return List with `df`, `fill_is_column`, `fill_color`, `js_palette`, `domain`.
+#' Attach per-cell fill columns to the data frame
+#'
+#' Per-cell colours land in `_fill_r/g/b/a` integer columns; numeric
+#' mappings additionally keep the raw value in `_fill_value`.
+#' @return List with `df`, `fill_color` (RGBA integer vector for a
+#'   uniform fill, else `NULL`) and `legend` (`list(colors, domain)`
+#'   for numeric mappings, else `NULL`).
 #' @noRd
 attach_fill <- function(df, fill_resolved, prepared, palette) {
-  if (fill_resolved$type == "column") {
-    col_vals <- prepared$extra[[fill_resolved$col]]
-    if (is.null(col_vals)) {
-      cli::cli_abort(
-        "Column {.val {fill_resolved$col}} not found in {.arg cells}."
-      )
-    }
-    if (isTRUE(fill_resolved$identity)) {
-      df[["_fill_rgba"]] <- identity_to_rgba(col_vals)
-      return(list(
-        df = df,
-        fill_is_column = FALSE,
-        fill_color = NULL,
-        js_palette = NULL,
-        domain = NULL
-      ))
-    }
-    if (!is.numeric(col_vals)) {
-      cli::cli_abort(
-        "Column {.val {fill_resolved$col}} must be numeric for fill mapping, not {.obj_type_friendly {col_vals}}."
-      )
-    }
-    vals <- as.numeric(col_vals)
-    domain <- range(vals, na.rm = TRUE)
-    rgba <- values_to_rgba(vals, domain, palette)
-    df[["_fill_value"]] <- vals
-    df[["_fill_r"]] <- rgba$r
-    df[["_fill_g"]] <- rgba$g
-    df[["_fill_b"]] <- rgba$b
-    df[["_fill_a"]] <- rgba$a
-    list(
-      df = df,
-      fill_is_column = TRUE,
-      fill_color = NULL,
-      js_palette = NULL,
-      domain = domain
-    )
-  } else if (fill_resolved$type == "numeric") {
-    vals_sub <- fill_resolved$values[prepared$not_na]
-    domain <- range(vals_sub, na.rm = TRUE)
-    rgba <- values_to_rgba(vals_sub, domain, palette)
-    df[["_fill_value"]] <- vals_sub
-    df[["_fill_r"]] <- rgba$r
-    df[["_fill_g"]] <- rgba$g
-    df[["_fill_b"]] <- rgba$b
-    df[["_fill_a"]] <- rgba$a
-    list(
-      df = df,
-      fill_is_column = TRUE,
-      fill_color = NULL,
-      js_palette = NULL,
-      domain = domain
-    )
-  } else if (fill_resolved$type == "identity") {
-    vals_sub <- fill_resolved$values[prepared$not_na]
-    df[["_fill_rgba"]] <- identity_to_rgba(vals_sub)
-    list(
-      df = df,
-      fill_is_column = FALSE,
-      fill_color = NULL,
-      js_palette = NULL,
-      domain = NULL
-    )
-  } else if (fill_resolved$type == "colors") {
-    cols_sub <- fill_resolved$values[prepared$not_na]
-    df[["_fill_rgba"]] <- lapply(cols_sub, hex_to_rgba)
-    list(
-      df = df,
-      fill_is_column = FALSE,
-      fill_color = NULL,
-      js_palette = NULL,
-      domain = NULL
-    )
+  type <- fill_resolved$type
+  fill_color <- NULL
+  legend <- NULL
+
+  if (type == "uniform") {
+    fill_color <- hex_to_rgba(fill_resolved$value)
   } else {
-    list(
-      df = df,
-      fill_is_column = FALSE,
-      fill_color = hex_to_rgba(fill_resolved$value),
-      js_palette = NULL,
-      domain = NULL
-    )
+    if (type == "column") {
+      vals <- prepared$extra[[fill_resolved$col]]
+      if (is.null(vals)) {
+        cli::cli_abort(
+          "Column {.val {fill_resolved$col}} not found in {.arg cells}."
+        )
+      }
+      if (isTRUE(fill_resolved$identity)) {
+        type <- "identity"
+      } else if (!is.numeric(vals)) {
+        cli::cli_abort(
+          "Column {.val {fill_resolved$col}} must be numeric for fill mapping, not {.obj_type_friendly {vals}}."
+        )
+      } else {
+        type <- "numeric"
+      }
+    } else {
+      vals <- fill_resolved$values[prepared$not_na]
+    }
+
+    if (type == "numeric") {
+      vals <- as.numeric(vals)
+      domain <- range(vals, na.rm = TRUE)
+      pal_hex <- resolve_palette(palette, 256L)
+      rgba <- values_to_rgba(vals, domain, pal_hex)
+      df[["_fill_value"]] <- vals
+      legend <- list(colors = pal_hex, domain = domain)
+    } else if (type == "identity") {
+      rgba <- identity_to_rgba(vals)
+    } else {
+      rgba <- colours_to_rgba(vals)
+    }
+    df[["_fill_r"]] <- rgba$r
+    df[["_fill_g"]] <- rgba$g
+    df[["_fill_b"]] <- rgba$b
+    df[["_fill_a"]] <- rgba$a
   }
+
+  list(df = df, fill_color = fill_color, legend = legend)
 }
 
-#' Convert hex colour string to RGBA array
+#' Convert a single colour string to an RGBA integer vector
 #' @noRd
 hex_to_rgba <- function(hex) {
   rgb <- grDevices::col2rgb(hex, alpha = TRUE)
   as.integer(rgb[, 1])
 }
 
-#' Convert identity fill values to per-cell RGBA list
+#' Convert a vector of colour strings to RGBA channel vectors
+#' @return A list of integer vectors `r`, `g`, `b`, `a`.
+#' @noRd
+colours_to_rgba <- function(cols) {
+  m <- grDevices::col2rgb(cols, alpha = TRUE)
+  list(
+    r = as.integer(m[1L, ]),
+    g = as.integer(m[2L, ]),
+    b = as.integer(m[3L, ]),
+    a = as.integer(m[4L, ])
+  )
+}
+
+#' Convert identity fill values to RGBA channel vectors
 #'
-#' Handles packed uint32 RGB integers `(R << 16) | (G << 8) | B` or
-#' hex colour strings.
-#' @param values Numeric (packed RGB) or character (hex) vector.
-#' @return A list of length-4 integer vectors `[r, g, b, a]`.
+#' Handles packed RGB integers `(R << 16) | (G << 8) | B` or colour
+#' strings.
+#' @param values Numeric (packed RGB) or character (colour) vector.
+#' @return A list of integer vectors `r`, `g`, `b`, `a`.
 #' @noRd
 identity_to_rgba <- function(values) {
   if (is.numeric(values)) {
     vals <- as.integer(values)
-    r <- bitwAnd(bitwShiftR(vals, 16L), 0xFFL)
-    g <- bitwAnd(bitwShiftR(vals, 8L), 0xFFL)
-    b <- bitwAnd(vals, 0xFFL)
-    mapply(
-      function(ri, gi, bi) c(ri, gi, bi, 255L),
-      r,
-      g,
-      b,
-      SIMPLIFY = FALSE,
-      USE.NAMES = FALSE
+    list(
+      r = bitwAnd(bitwShiftR(vals, 16L), 0xFFL),
+      g = bitwAnd(bitwShiftR(vals, 8L), 0xFFL),
+      b = bitwAnd(vals, 0xFFL),
+      a = rep(255L, length(vals))
     )
   } else if (is.character(values)) {
-    lapply(values, hex_to_rgba)
+    colours_to_rgba(values)
   } else {
     cli::cli_abort(
       "{.arg fill} with {.code fill_identity = TRUE} must be numeric (packed RGB) or character (hex colours), not {.obj_type_friendly {values}}."
@@ -448,11 +419,10 @@ identity_to_rgba <- function(values) {
 }
 
 #' Map numeric values to RGBA through a palette (vectorised)
-#'
-#' Returns a list with integer vectors r, g, b, a (each length n).
+#' @param pal_hex Character vector of hex colours (the resolved palette).
+#' @return A list of integer vectors `r`, `g`, `b`, `a`.
 #' @noRd
-values_to_rgba <- function(values, domain, palette) {
-  pal_hex <- resolve_palette(palette, 256L)
+values_to_rgba <- function(values, domain, pal_hex) {
   rng <- domain[2] - domain[1]
   if (rng == 0) {
     t <- rep(0.5, length(values))
@@ -463,11 +433,5 @@ values_to_rgba <- function(values, domain, palette) {
     length(pal_hex),
     pmax(1L, as.integer(t * (length(pal_hex) - 1)) + 1L)
   )
-  rgba <- grDevices::col2rgb(pal_hex[idx], alpha = TRUE)
-  list(
-    r = as.integer(rgba[1L, ]),
-    g = as.integer(rgba[2L, ]),
-    b = as.integer(rgba[3L, ]),
-    a = as.integer(rgba[4L, ])
-  )
+  colours_to_rgba(pal_hex[idx])
 }

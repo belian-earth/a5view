@@ -37,7 +37,7 @@ style of \code{ggplot2::aes()}. This makes the colour helpers
 call, e.g. \code{a5_view(df, fill = cells_rgb(r, g, b))} or
 \code{a5_view(df, fill = cells_pca_rgb(embedding))}. The helpers tag
 their output so \code{fill_identity} is auto-enabled.
-Default: \code{"#3388ff"}.
+Default: \code{"#74ac90ff"}.
 }}
 
 \item{fill_identity}{Logical. When \code{TRUE}, treat \code{fill} values as
@@ -48,9 +48,9 @@ strings. Auto-enabled when \code{fill} is produced by \code{\link[=cells_rgb]{ce
 \code{attr(x, "a5_identity") <- TRUE}. Default: \code{FALSE}.}
 
 \item{palette}{Colour palette used when \code{fill} is numeric. Either a
-palette name accepted by \code{\link[grDevices:palettes]{grDevices::hcl.colors()}} (e.g.
+palette name accepted by \code{\link[grDevices:hcl.colors]{grDevices::hcl.colors()}} (e.g.
 \code{"viridis"}, \code{"inferno"}, \code{"plasma"}, \code{"turbo"}, \code{"rocket"}) or
-a character vector of hex colours (at least 2). Default: \code{"viridis"}.}
+a character vector of hex colours (at least 2). Default: \code{"Viridis"}.}
 
 \item{elevation}{Column name for 3D extrusion, or \code{NULL} for flat.}
 

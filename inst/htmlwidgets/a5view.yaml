@@ -1,18 +1,20 @@
 dependencies:
-  - name: deckgl
-    version: 9.2
+  - name: maplibre-gl
+    version: 5.24.0
     src:
-      href: https://unpkg.com/deck.gl@^9.2.0
+      href: https://unpkg.com/maplibre-gl@5.24.0/dist
     script:
-      - dist.min.js
-  - name: deckgl-geo-layers
-    version: 9.2
+      - maplibre-gl.js
+    stylesheet:
+      - maplibre-gl.css
+  - name: deckgl
+    version: 9.4.0
     src:
-      href: https://unpkg.com/@deck.gl/geo-layers@^9.2.0
+      href: https://unpkg.com/deck.gl@9.4.0
     script:
       - dist.min.js
   - name: a5-js
-    version: 0.7.3
+    version: 0.10.0
     src:
       file: htmlwidgets/lib/a5-js
     script:
@@ -24,7 +26,7 @@ dependencies:
     script:
       - hyparquet-bootstrap.js
   - name: a5view-tiling
-    version: 0.1.0
+    version: 0.2.0
     src:
       file: htmlwidgets/lib/a5view-tiling
     script:

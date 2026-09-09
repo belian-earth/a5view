@@ -78,9 +78,10 @@ test_that("cells_rgb output is integer in the packed-RGB range", {
 test_that("cells_rgb round-trips through identity_to_rgba", {
   packed <- cells_rgb(c(0, 1, 0.5), c(1, 0, 0.5), c(0, 1, 0.5))
   rgba <- identity_to_rgba(packed)
-  expect_equal(rgba[[1]], c(0L, 255L, 0L, 255L))
-  expect_equal(rgba[[2]], c(255L, 0L, 255L, 255L))
-  expect_equal(rgba[[3]], c(128L, 128L, 128L, 255L))
+  expect_equal(rgba$r, c(0L, 255L, 128L))
+  expect_equal(rgba$g, c(255L, 0L, 128L))
+  expect_equal(rgba$b, c(0L, 255L, 128L))
+  expect_equal(rgba$a, c(255L, 255L, 255L))
 })
 
 # --- cells_pca_rgb ---
@@ -188,11 +189,9 @@ test_that("cells_pca_rgb rgb_pcs reorders channels", {
   # vs (B<<16)|(G<<8)|R. Decompose both and check.
   default_rgba <- identity_to_rgba(default)
   swapped_rgba <- identity_to_rgba(swapped)
-  for (i in seq_along(default_rgba)) {
-    expect_equal(default_rgba[[i]][1], swapped_rgba[[i]][3])
-    expect_equal(default_rgba[[i]][2], swapped_rgba[[i]][2])
-    expect_equal(default_rgba[[i]][3], swapped_rgba[[i]][1])
-  }
+  expect_equal(default_rgba$r, swapped_rgba$b)
+  expect_equal(default_rgba$g, swapped_rgba$g)
+  expect_equal(default_rgba$b, swapped_rgba$r)
 })
 
 test_that("cells_pca_rgb rgb_pcs negative index flips PC sign", {
@@ -206,10 +205,9 @@ test_that("cells_pca_rgb rgb_pcs negative index flips PC sign", {
   # max/min). Net effect: red byte goes to (255 - old_red).
   a_rgba <- identity_to_rgba(a)
   b_rgba <- identity_to_rgba(b)
-  for (i in seq_along(a_rgba)) {
-    expect_equal(b_rgba[[i]][1], 255L - a_rgba[[i]][1])
-    expect_equal(a_rgba[[i]][2:3], b_rgba[[i]][2:3])
-  }
+  expect_equal(b_rgba$r, 255L - a_rgba$r)
+  expect_equal(a_rgba$g, b_rgba$g)
+  expect_equal(a_rgba$b, b_rgba$b)
 })
 
 test_that("cells_pca_rgb validates rgb_pcs argument", {
@@ -258,57 +256,57 @@ test_that("resolve_palette passes through custom colours", {
 # --- resolve_fill ---
 
 test_that("resolve_fill detects uniform colour", {
-  result <- resolve_fill(NULL, "#3388ff", quote("#3388ff"), 10)
+  result <- resolve_fill(NULL, rlang::quo("#3388ff"), 10)
   expect_equal(result$type, "uniform")
   expect_equal(result$value, "#3388ff")
 })
 
 test_that("resolve_fill detects numeric vector", {
   vals <- 1:5
-  result <- resolve_fill(NULL, vals, quote(vals), 5)
+  result <- resolve_fill(NULL, rlang::quo(vals), 5)
   expect_equal(result$type, "numeric")
   expect_equal(result$values, 1:5)
 })
 
 test_that("resolve_fill rejects single number", {
-  expect_error(resolve_fill(NULL, 42, quote(42), 10), "single number")
+  expect_error(resolve_fill(NULL, rlang::quo(42), 10), "single number")
 })
 
 test_that("resolve_fill rejects mismatched numeric length", {
-  expect_error(resolve_fill(NULL, 1:3, quote(x), 5), "length 3")
+  expect_error(resolve_fill(NULL, rlang::quo(1:3), 5), "length 3")
 })
 
 test_that("resolve_fill rejects all-NA numeric", {
   expect_error(
-    resolve_fill(NULL, rep(NA_real_, 3), quote(x), 3),
+    resolve_fill(NULL, rlang::quo(rep(NA_real_, 3)), 3),
     "all.*NA"
   )
 })
 
 test_that("resolve_fill detects colour vector", {
   cols <- c("#ff0000", "#00ff00", "#0000ff")
-  result <- resolve_fill(NULL, cols, quote(cols), 3)
+  result <- resolve_fill(NULL, rlang::quo(cols), 3)
   expect_equal(result$type, "colors")
 })
 
 test_that("resolve_fill rejects mismatched colour vector length", {
   cols <- c("#ff0000", "#00ff00")
-  expect_error(resolve_fill(NULL, cols, quote(cols), 5), "length 2")
+  expect_error(resolve_fill(NULL, rlang::quo(cols), 5), "length 2")
 })
 
 test_that("resolve_fill rejects invalid colour in vector", {
   cols <- c("#ff0000", "notacolour", "#0000ff")
-  expect_error(resolve_fill(NULL, cols, quote(cols), 3), "Invalid colour")
+  expect_error(resolve_fill(NULL, rlang::quo(cols), 3), "Invalid colour")
 })
 
 test_that("resolve_fill rejects invalid single colour", {
-  expect_error(resolve_fill(NULL, "notacolour", quote("notacolour"), 1), "not valid")
+  expect_error(resolve_fill(NULL, rlang::quo("notacolour"), 1), "not valid")
 })
 
 test_that("resolve_fill detects column name in data frame", {
   cell <- a5R::a5_lonlat_to_cell(0, 0, resolution = 5)
   df <- data.frame(cell = cell, value = 1.0)
-  result <- resolve_fill(df, df$value, quote(value), 1)
+  result <- resolve_fill(df, rlang::quo(value), 1)
   expect_equal(result$type, "column")
   expect_equal(result$col, "value")
 })
@@ -316,11 +314,11 @@ test_that("resolve_fill detects column name in data frame", {
 test_that("resolve_fill errors on missing column name", {
   cell <- a5R::a5_lonlat_to_cell(0, 0, resolution = 5)
   df <- data.frame(cell = cell, value = 1.0)
-  expect_error(resolve_fill(df, NULL, quote(missing_col), 1), "not found")
+  expect_error(resolve_fill(df, rlang::quo(missing_col), 1), "not found")
 })
 
 test_that("resolve_fill rejects non-colour/non-numeric types", {
-  expect_error(resolve_fill(NULL, TRUE, quote(TRUE), 1), "colour string")
+  expect_error(resolve_fill(NULL, rlang::quo(TRUE), 1), "colour string")
 })
 
 # --- attach_fill ---
@@ -331,10 +329,9 @@ test_that("attach_fill handles uniform fill", {
   fill_resolved <- list(type = "uniform", value = "#ff0000")
 
   result <- attach_fill(df, fill_resolved, prepared, "Viridis")
-  expect_false(result$fill_is_column)
   expect_equal(result$fill_color, c(255L, 0L, 0L, 255L))
-  expect_null(result$js_palette)
-  expect_null(result$domain)
+  expect_null(result$legend)
+  expect_false("_fill_r" %in% names(result$df))
 })
 
 test_that("attach_fill handles numeric fill", {
@@ -347,11 +344,10 @@ test_that("attach_fill handles numeric fill", {
   fill_resolved <- list(type = "numeric", values = c(1, 2, 3))
 
   result <- attach_fill(df, fill_resolved, prepared, "Viridis")
-  expect_true(result$fill_is_column)
+  expect_null(result$fill_color)
   expect_equal(result$df[["_fill_value"]], c(1, 2, 3))
-  expect_equal(result$domain, c(1, 3))
-  # Palette mapping done R-side; js_palette is NULL
-  expect_null(result$js_palette)
+  expect_equal(result$legend$domain, c(1, 3))
+  expect_equal(result$legend$colors, grDevices::hcl.colors(256, "Viridis"))
   # RGBA columns should be present
   expect_true("_fill_r" %in% names(result$df))
 })
@@ -366,9 +362,9 @@ test_that("attach_fill handles column fill", {
   fill_resolved <- list(type = "column", col = "value")
 
   result <- attach_fill(df, fill_resolved, prepared, "Viridis")
-  expect_true(result$fill_is_column)
+  expect_null(result$fill_color)
   expect_equal(result$df[["_fill_value"]], c(10, 20))
-  expect_equal(result$domain, c(10, 20))
+  expect_equal(result$legend$domain, c(10, 20))
 })
 
 test_that("attach_fill rejects non-numeric column", {

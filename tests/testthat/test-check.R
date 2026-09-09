@@ -42,6 +42,7 @@ test_that("check_number_decimal validates range", {
   expect_error(check_number_decimal(-0.1, min = 0, max = 1, arg = "x"), "between")
   expect_error(check_number_decimal(1.5, min = 0, max = 1, arg = "x"), "between")
   expect_error(check_number_decimal(-1, min = 0, arg = "x"), ">= 0")
+  expect_error(check_number_decimal(2, max = 1, arg = "x"), "<= 1")
 })
 
 test_that("check_number_decimal accepts valid values", {
@@ -149,15 +150,15 @@ test_that("check_palette rejects non-character", {
   expect_error(check_palette(TRUE), "palette name")
 })
 
-test_that("check_draw_polygon accepts TRUE/FALSE", {
-  expect_no_error(check_draw_polygon(TRUE))
-  expect_no_error(check_draw_polygon(FALSE))
+test_that("check_bool accepts TRUE/FALSE", {
+  expect_no_error(check_bool(TRUE, "x"))
+  expect_no_error(check_bool(FALSE, "x"))
 })
 
-test_that("check_draw_polygon rejects non-bool", {
-  expect_error(check_draw_polygon(NULL), "TRUE.*FALSE")
-  expect_error(check_draw_polygon(NA), "TRUE.*FALSE")
-  expect_error(check_draw_polygon(1), "TRUE.*FALSE")
-  expect_error(check_draw_polygon("yes"), "TRUE.*FALSE")
-  expect_error(check_draw_polygon(c(TRUE, FALSE)), "TRUE.*FALSE")
+test_that("check_bool rejects non-bool", {
+  expect_error(check_bool(NULL, "x"), "TRUE.*FALSE")
+  expect_error(check_bool(NA, "x"), "TRUE.*FALSE")
+  expect_error(check_bool(1, "x"), "TRUE.*FALSE")
+  expect_error(check_bool("yes", "x"), "TRUE.*FALSE")
+  expect_error(check_bool(c(TRUE, FALSE), "x"), "TRUE.*FALSE")
 })

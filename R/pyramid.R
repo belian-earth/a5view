@@ -41,29 +41,16 @@ a5_build_pyramid <- function(
   check_optional_number(lng, "lng")
   check_optional_number(lat, "lat")
   check_optional_number(zoom, "zoom")
-  if (!rlang::is_bool(fill_identity)) {
-    cli::cli_abort("{.arg fill_identity} must be {.val TRUE} or {.val FALSE}.")
-  }
-  if (!rlang::is_integerish(lod_step, n = 1L) ||
-      is.na(lod_step) || lod_step < 1L) {
-    cli::cli_abort("{.arg lod_step} must be a positive integer.")
-  }
-  lod_step <- as.integer(lod_step)
+  check_bool(fill_identity, "fill_identity")
+  lod_step <- check_lod_step(lod_step)
 
   fill_quo <- rlang::enquo(fill)
-  fill_expr <- rlang::quo_get_expr(fill_quo)
-  elev_expr <- substitute(elevation)
-  if (is.call(fill_expr) && is.data.frame(cells)) {
-    fill <- rlang::eval_tidy(fill_quo, data = cells)
-  }
-
   prep <- prepare_view_data(
     cells = cells,
-    fill = fill,
-    fill_expr = fill_expr,
+    fill_quo = fill_quo,
     fill_identity = fill_identity,
     palette = palette,
-    elev_expr = elev_expr
+    elev_expr = substitute(elevation)
   )
   if (is.null(prep)) {
     cli::cli_abort("No non-NA cells to display.")
@@ -77,7 +64,8 @@ a5_build_pyramid <- function(
     aggregate = aggregate
   )
 
-  view_state <- auto_view(prep$df[["pentagon"]], lng, lat, zoom)
+  legend <- prep$legend
+  if (!is.null(legend)) legend$label <- rlang::as_label(fill_quo)
 
   meta <- list(
     data_resolution = prep$data_resolution,
@@ -85,8 +73,9 @@ a5_build_pyramid <- function(
     has_fill_value = prep$has_fill_value,
     fill_per_cell = prep$has_rgba_cols,
     extruded = prep$extruded,
-    fill_color = prep$fill_payload$fill_color,
-    view_state = view_state
+    fill_color = prep$fill_color,
+    legend = legend,
+    view_state = auto_view(prep$df[["pentagon"]], lng, lat, zoom)
   )
 
   serialise_pyramid_to_parquet(
@@ -137,20 +126,16 @@ a5_view_pyramid <- function(
   if (!rlang::is_string(path) || !file.exists(path)) {
     cli::cli_abort("{.arg path} must point to an existing parquet file.")
   }
-  check_number_decimal(opacity, min = 0, max = 1, arg = "opacity")
-  check_number_decimal(border_width, min = 0, arg = "border_width")
-  check_optional_number(lng, "lng")
-  check_optional_number(lat, "lat")
-  check_optional_number(zoom, "zoom")
-  check_optional_dimension(width, "width")
-  check_optional_dimension(height, "height")
-  check_border(border)
-  if (!rlang::is_bool(globe)) {
-    cli::cli_abort("{.arg globe} must be {.val TRUE} or {.val FALSE}.")
+  check_view_options(
+    opacity, border, border_width, width, height, lng, lat, zoom,
+    globe, basemap, tooltip, draw_polygon
+  )
+  if (is.character(tooltip)) {
+    cli::cli_abort(c(
+      "{.arg tooltip} must be {.val TRUE} or {.val FALSE} for prebuilt pyramids.",
+      "i" = "Extra tooltip columns are only available from {.fn a5_view} with {.code aggregate = \"none\"}."
+    ))
   }
-  check_basemap(basemap)
-  check_tooltip(tooltip)
-  check_draw_polygon(draw_polygon)
 
   meta <- read_pyramid_meta(path)
   if (is.null(meta)) {
@@ -161,115 +146,33 @@ a5_view_pyramid <- function(
   }
 
   bytes <- readBin(path, "raw", n = file.info(path)$size)
-  parquet_b64 <- base64enc::base64encode(bytes)
 
   view_state <- meta$view_state
   if (!is.null(lng)) view_state$longitude <- lng
   if (!is.null(lat)) view_state$latitude <- lat
   if (!is.null(zoom)) view_state$zoom <- zoom
 
-  payload <- list(
-    arrow_ipc = NULL,
-    parquet_b64 = parquet_b64,
-    fill_is_column = FALSE,
-    fill_color = meta$fill_color,
-    fill_per_cell = isTRUE(meta$fill_per_cell),
-    palette = NULL,
-    domain = NULL,
-    opacity = opacity,
-    extruded = isTRUE(meta$extruded),
-    elevation_scale = 1,
-    pickable = !isFALSE(tooltip),
-    tooltip = !isFALSE(tooltip),
-    has_fill_value = isTRUE(meta$has_fill_value),
-    stroked = !is.null(border),
-    line_color = if (!is.null(border)) hex_to_rgba(border) else NULL,
-    line_width = border_width,
-    view_state = view_state,
-    globe = globe,
-    basemaps = as.list(basemap),
-    draw_polygon = draw_polygon,
-    data_resolution = meta$data_resolution,
-    lod_resolutions = meta$lod_resolutions
-  )
-
-  widget <- htmlwidgets::createWidget(
-    name = "a5view",
-    x = payload,
-    width = width,
-    height = height,
-    package = "a5view",
-    sizingPolicy = htmlwidgets::sizingPolicy(
-      viewer.padding = 0,
-      viewer.fill = TRUE,
-      browser.fill = TRUE,
-      browser.padding = 0
+  payload <- c(
+    list(
+      arrow_ipc = NULL,
+      parquet_b64 = base64enc::base64encode(bytes),
+      lod_resolutions = meta$lod_resolutions,
+      fill_color = meta$fill_color,
+      fill_per_cell = isTRUE(meta$fill_per_cell),
+      has_fill_value = isTRUE(meta$has_fill_value),
+      legend = meta$legend,
+      tooltip_cols = list()
+    ),
+    view_options_payload(
+      opacity, tooltip, border, border_width, globe, basemap, draw_polygon
+    ),
+    list(
+      extruded = isTRUE(meta$extruded),
+      elevation_scale = 1,
+      view_state = view_state,
+      data_resolution = meta$data_resolution
     )
   )
-  widget <- geoarrowWidget::attachArrowDependency(widget)
-  widget
-}
 
-#' Shared pre-pyramid data prep (used by a5_view, a5_view_update,
-#' a5_build_pyramid)
-#'
-#' Resolves fill, prepares the data frame, attaches per-cell RGBA, and
-#' attaches elevation. Stops short of pyramid construction so the
-#' legacy `aggregate = "none"` path can reuse the same helper. Callers
-#' handle NSE around `fill` and `elevation` and pass the evaluated
-#' values plus the original expressions in.
-#' @noRd
-prepare_view_data <- function(cells, fill, fill_expr, fill_identity,
-                              palette, elev_expr) {
-  n_cells <- if (a5R::is_a5_cell(cells)) length(cells) else nrow(cells)
-  fill_resolved <- resolve_fill(cells, fill, fill_expr, n_cells)
-
-  if (!fill_identity && has_identity_tag(cells, fill_resolved)) {
-    fill_identity <- TRUE
-  }
-  if (fill_identity) {
-    if (fill_resolved$type == "column") {
-      fill_resolved$identity <- TRUE
-    } else if (fill_resolved$type == "numeric") {
-      fill_resolved$type <- "identity"
-    } else if (fill_resolved$type != "colors") {
-      cli::cli_abort(
-        "{.code fill_identity = TRUE} requires {.arg fill} to be a numeric vector, hex colour vector, or column name."
-      )
-    }
-  }
-
-  elev_col <- resolve_elevation_col(cells, elev_expr)
-
-  prepared <- prepare_data(cells)
-  df <- prepared$data
-
-  if (nrow(df) == 0L) {
-    return(NULL)
-  }
-
-  fill_payload <- attach_fill(df, fill_resolved, prepared, palette)
-  df <- normalize_rgba_cols(fill_payload$df)
-
-  extruded <- !is.null(elev_col)
-  if (extruded) {
-    elev_vals <- prepared$extra[[elev_col]] %||% df[[elev_col]]
-    if (!is.numeric(elev_vals)) {
-      cli::cli_abort(
-        "Elevation column {.val {elev_col}} must be numeric, not {.obj_type_friendly {elev_vals}}."
-      )
-    }
-    df[["_elevation"]] <- as.numeric(elev_vals)
-  }
-
-  list(
-    df = df,
-    leaf_cells = prepared$a5_cells,
-    extra = prepared$extra,
-    fill_payload = fill_payload,
-    has_fill_value = "_fill_value" %in% names(df),
-    has_rgba_cols = "_fill_r" %in% names(df),
-    extruded = extruded,
-    data_resolution = as.integer(a5R::a5_get_resolution(prepared$a5_cells[[1]]))
-  )
+  new_a5view_widget(payload, width, height)
 }

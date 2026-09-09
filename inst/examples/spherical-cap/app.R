@@ -139,14 +139,14 @@ server <- function(input, output, session) {
     }
   })
 
-  # Smoke test: log polygon WKT and round-trip through a5_grid
+  # Smoke test: log polygon WKT and round-trip through a5_polygon_to_cells
   observeEvent(input$map_polygon_draw, {
     wkt <- input$map_polygon_draw
     message("[draw] polygon WKT: ", wkt)
     cells_in <- tryCatch(
-      a5R::a5_grid(wk::wkt(wkt), resolution = resolution),
+      a5R::a5_polygon_to_cells(wk::wkt(wkt), resolution = resolution),
       error = function(e) {
-        message("[draw] a5_grid failed: ", conditionMessage(e))
+        message("[draw] a5_polygon_to_cells failed: ", conditionMessage(e))
         NULL
       }
     )

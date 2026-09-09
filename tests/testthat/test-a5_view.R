@@ -94,7 +94,7 @@ test_that("a5_view works with uniform fill", {
   cells <- make_cells(3)
   w <- a5_view(cells, fill = "#ff0000")
   expect_s3_class(w, "htmlwidget")
-  expect_false(w$x$fill_is_column)
+  expect_false(w$x$has_fill_value)
   expect_equal(w$x$fill_color, c(255L, 0L, 0L, 255L))
 })
 
@@ -102,9 +102,9 @@ test_that("a5_view works with numeric fill vector", {
   cells <- make_cells(5)
   vals <- as.numeric(1:5)
   w <- a5_view(cells, fill = vals)
-  expect_true(w$x$fill_is_column)
   expect_true(w$x$has_fill_value)
-  expect_equal(w$x$domain, c(1, 5))
+  expect_true(w$x$has_fill_value)
+  expect_equal(w$x$legend$domain, c(1, 5))
 })
 
 test_that("a5_view works with colour vector fill", {
@@ -118,8 +118,8 @@ test_that("a5_view works with column name fill", {
   cells <- make_cells(3)
   df <- data.frame(cell = cells, score = c(1.0, 2.0, 3.0))
   w <- a5_view(df, fill = score)
-  expect_true(w$x$fill_is_column)
-  expect_equal(w$x$domain, c(1, 3))
+  expect_true(w$x$has_fill_value)
+  expect_equal(w$x$legend$domain, c(1, 3))
 })
 
 test_that("a5_view errors on fill column not found", {
@@ -145,7 +145,7 @@ test_that("fill_identity works with packed RGB integers", {
   )
   w <- a5_view(cells, fill = rgb_packed, fill_identity = TRUE)
   expect_true(w$x$fill_per_cell)
-  expect_false(w$x$fill_is_column)
+  expect_false(w$x$has_fill_value)
   # Verify RGBA encoded in Arrow IPC
   tbl <- decode_leaf_tbl(w$x$arrow_ipc)
   expect_equal(as.integer(tbl[["_fill_r"]]), c(255L, 0L, 0L))
@@ -191,7 +191,7 @@ test_that("a5_view evaluates fill expression against data frame columns", {
   )
   w <- a5_view(df, fill = cells_rgb(r, g, b))
   expect_true(w$x$fill_per_cell)
-  expect_false(w$x$fill_is_column)
+  expect_false(w$x$has_fill_value)
   tbl <- decode_leaf_tbl(w$x$arrow_ipc)
   expect_equal(as.integer(tbl[["_fill_r"]]), c(255L, 0L, 0L))
   expect_equal(as.integer(tbl[["_fill_g"]]), c(0L, 255L, 0L))
@@ -231,8 +231,8 @@ test_that("a5_view bare column name still palette-maps untagged numeric", {
   cells <- make_cells(3)
   df <- data.frame(cell = cells, score = c(1.0, 2.0, 3.0))
   w <- a5_view(df, fill = score)
-  expect_true(w$x$fill_is_column)
-  expect_equal(w$x$domain, c(1, 3))
+  expect_true(w$x$has_fill_value)
+  expect_equal(w$x$legend$domain, c(1, 3))
   # palette path produces _fill_value alongside RGBA; identity path does not
   tbl <- decode_leaf_tbl(w$x$arrow_ipc)
   expect_true("_fill_value" %in% names(tbl))
@@ -269,17 +269,19 @@ test_that("a5_view with custom colour palette pre-computes RGBA", {
   cells <- make_cells(5)
   vals <- as.numeric(1:5)
   w <- a5_view(cells, fill = vals, palette = c("#000000", "#ffffff"))
-  # Palette mapping is done R-side; JS receives pre-computed RGBA
-  expect_null(w$x$palette)
+  # Palette mapping is done R-side; JS receives pre-computed RGBA plus
+  # the palette stops for the legend
   expect_true(w$x$fill_per_cell)
+  expect_equal(w$x$legend$colors, c("#000000", "#ffffff"))
+  expect_equal(w$x$legend$label, "vals")
 })
 
 test_that("a5_view with named palette pre-computes RGBA", {
   cells <- make_cells(5)
   vals <- as.numeric(1:5)
   w <- a5_view(cells, fill = vals, palette = "Inferno")
-  expect_null(w$x$palette)
   expect_true(w$x$fill_per_cell)
+  expect_length(w$x$legend$colors, 256)
 })
 
 # --- Border ---
@@ -320,13 +322,63 @@ test_that("a5_view accepts single basemap", {
 
 # --- Tooltip ---
 
-test_that("a5_view sets pickable based on tooltip", {
+test_that("a5_view passes tooltip flag", {
   cells <- make_cells(3)
   w1 <- a5_view(cells, tooltip = TRUE)
-  expect_true(w1$x$pickable)
+  expect_true(w1$x$tooltip)
+  expect_equal(w1$x$tooltip_cols, list())
 
   w2 <- a5_view(cells, tooltip = FALSE)
-  expect_false(w2$x$pickable)
+  expect_false(w2$x$tooltip)
+})
+
+test_that("a5_view ships tooltip columns in the Arrow payload", {
+  cells <- make_cells(3)
+  df <- data.frame(cell = cells, name = c("a", "b", "c"), score = 1:3)
+  w <- a5_view(df, tooltip = c("name", "score"))
+  expect_equal(w$x$tooltip_cols, list("name", "score"))
+  tbl <- decode_leaf_tbl(w$x$arrow_ipc)
+  expect_equal(as.character(tbl[["name"]]), c("a", "b", "c"))
+  expect_equal(as.integer(tbl[["score"]]), 1:3)
+})
+
+test_that("a5_view rejects unknown or list tooltip columns", {
+  cells <- make_cells(3)
+  df <- data.frame(cell = cells, score = 1:3)
+  expect_error(a5_view(df, tooltip = "nope"), "not found")
+  df$emb <- list(1:2, 3:4, 5:6)
+  expect_error(a5_view(df, tooltip = "emb"), "atomic")
+})
+
+test_that("a5_view warns and drops tooltip columns for pyramids", {
+  cells <- make_cells(3)
+  df <- data.frame(cell = cells, score = 1:3)
+  expect_warning(
+    w <- a5_view(df, tooltip = "score", aggregate = "rep_child"),
+    "aggregate"
+  )
+  expect_equal(w$x$tooltip_cols, list())
+})
+
+test_that("a5_view legend is NULL for uniform and identity fills", {
+  cells <- make_cells(3)
+  expect_null(a5_view(cells)$x$legend)
+  expect_null(a5_view(cells, fill = c("#ff0000", "#00ff00", "#0000ff"))$x$legend)
+})
+
+test_that("a5_view legend label follows the fill expression", {
+  cells <- make_cells(3)
+  df <- data.frame(cell = cells, score = c(1, 2, 3))
+  expect_equal(a5_view(df, fill = score)$x$legend$label, "score")
+  expect_equal(a5_view(df, fill = score * 2)$x$legend$label, "score * 2")
+})
+
+test_that("a5_view resolves a bare name from the caller when not a column", {
+  cells <- make_cells(3)
+  df <- data.frame(cell = cells, other = 1:3)
+  vals <- c(5, 6, 7)
+  w <- a5_view(df, fill = vals)
+  expect_equal(w$x$legend$domain, c(5, 7))
 })
 
 # --- View state ---
@@ -431,7 +483,7 @@ test_that("a5_view_update builds correct message with bare cells", {
   msg <- captured$message
   expect_true(is.character(msg$arrow_ipc))
   expect_true(nchar(msg$arrow_ipc) > 0)
-  expect_false(msg$fill_is_column)
+  expect_false(msg$has_fill_value)
   expect_true(msg$tooltip)
 })
 
@@ -446,7 +498,7 @@ test_that("a5_view_update builds correct message with numeric fill", {
   )
   a5_view_update(mock_session, "map", cells, fill = vals, palette = "Viridis")
   msg <- captured$message
-  expect_true(msg$fill_is_column)
+  expect_true(msg$has_fill_value)
   expect_true(msg$fill_per_cell)
   expect_true(msg$has_fill_value)
   # Arrow IPC should contain RGBA columns
@@ -466,8 +518,8 @@ test_that("a5_view_update builds correct message with data frame", {
   )
   a5_view_update(mock_session, "map", df, fill = score)
   msg <- captured$message
-  expect_true(msg$fill_is_column)
-  expect_equal(msg$domain, c(1, 3))
+  expect_true(msg$has_fill_value)
+  expect_equal(msg$legend$domain, c(1, 3))
 })
 
 test_that("a5_view_update passes tooltip = FALSE", {
