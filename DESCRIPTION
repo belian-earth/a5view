@@ -16,7 +16,7 @@ License: Apache License (>= 2)
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 Imports:
-    a5R,
+    a5R (>= 0.6.0),
     arrow,
     base64enc,
     cli,
