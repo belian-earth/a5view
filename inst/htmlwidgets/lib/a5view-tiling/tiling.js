@@ -6,8 +6,6 @@
 //
 //   - zoom -> A5 resolution mapping (ZOOM_TO_RES) and LOD snapping
 //   - viewport -> lon/lat bbox sanitisation (antimeridian aware)
-//   - a page-lifetime cache of cell boundaries (cellToBoundary is the
-//     heaviest call we make, and the geometry never changes)
 //
 // Tunable knobs live on window.A5View.tiling.* so they can be tweaked
 // from the browser console. Set window.A5View.DEBUG = true to enable
@@ -72,29 +70,6 @@
   TILING.bigintToHex = function (b) {
     return b.toString(16).padStart(16, "0");
   };
-
-  // Boundary cache keyed by cell BigInt. Soft cap with FIFO drop of
-  // the oldest half on overflow.
-  var BOUNDARY_CACHE = new Map();
-  var BOUNDARY_CACHE_LIMIT = 20000;
-
-  TILING.cachedBoundary = function (A5, cellBigInt) {
-    var b = BOUNDARY_CACHE.get(cellBigInt);
-    if (b) return b;
-    b = A5.cellToBoundary(cellBigInt, { closedRing: false });
-    if (BOUNDARY_CACHE.size >= BOUNDARY_CACHE_LIMIT) {
-      var i = 0, drop = BOUNDARY_CACHE_LIMIT >> 1;
-      var it = BOUNDARY_CACHE.keys();
-      var step = it.next();
-      while (!step.done && i < drop) {
-        BOUNDARY_CACHE.delete(step.value);
-        step = it.next(); i++;
-      }
-    }
-    BOUNDARY_CACHE.set(cellBigInt, b);
-    return b;
-  };
-  TILING.boundaryCacheSize = function () { return BOUNDARY_CACHE.size; };
 
   // Sanitise a viewport into a {west, south, east, north} bbox,
   // inflated by VIEWPORT_BUFFER on each side. Handles missing / NaN

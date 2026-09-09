@@ -180,7 +180,9 @@ build_a5_pyramid <- function(leaf_cells, df, data_resolution, lod_step,
 #' @param row_group_size Integer. Cap on rows per parquet row group.
 #' @param pivot_offset Integer. Tile bucketing: rows at `lod` are grouped
 #'   by their parent at `lod - pivot_offset`. A5 cells have four
-#'   children, so `5` gives up to 1024 rows per row group.
+#'   children, so `6` gives up to 4096 rows per row group. Bigger tiles
+#'   mean fewer deck.gl sub-layers per screen, which is the dominant
+#'   per-tile cost in the browser.
 #' @param path Destination path for the parquet file. Encoding for the
 #'   browser (inline base64 or a served URL) is `parquet_payload()`'s
 #'   job.
@@ -195,7 +197,7 @@ serialise_pyramid_to_parquet <- function(pdf, path,
                                          has_fill_value, has_rgba_cols,
                                          extruded,
                                          row_group_size = 10000L,
-                                         pivot_offset = 5L,
+                                         pivot_offset = 6L,
                                          min_lod = 2L,
                                          meta = NULL) {
   row_group_size <- as.integer(row_group_size)

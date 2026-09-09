@@ -1,38 +1,50 @@
 // =====================================================================
 // a5view lazy parquet renderer
 // =====================================================================
-// Reads row groups on demand from an inline parquet payload so initial
-// paint only decodes what the current viewport+LOD need. Subsequent
+// Reads row groups on demand from a pyramid parquet file so initial
+// paint only decodes what the current viewport + LOD need. Subsequent
 // pans/zooms decode any newly-required row groups; everything else is
-// served from a Map<rg, decodedRows> cache.
+// served from a per-row-group cache of packed geometry.
 //
 // Wire format (set by R/prep-data.R::serialise_pyramid_to_parquet):
-//   - Parquet sorted by `_lod` ASC, with row groups bucketed by parent
-//     cell at `lod - pivot_offset`. Each row group's KV entry carries
-//     `{rg, lod_min, lod_max, west, south, east, north, tile_id?}` where
-//     `tile_id` is the parent cell's hex id (absent for non-tiled LODs).
+//   - Parquet sorted by `_lod` ASC; each row group holds a single LOD.
+//     Large LODs are bucketed by parent cell at `lod - pivot_offset`.
+//     Each row group's KV entry carries `{rg, lod_min, lod_max, west,
+//     south, east, north, tile_id?}` where `tile_id` is the parent
+//     cell's hex id (absent for the small, non-tiled LODs).
 //   - Schema KV metadata key `a5view_row_groups` holds that JSON array.
 //
+// Work split:
+//   - A Web Worker owns the parquet source (inline bytes or an HTTP URL
+//     read with Range requests), decodes row groups with hyparquet and
+//     turns each into packed typed arrays: pentagon boundaries from
+//     a5-js, RGBA, fill values. Only transferable buffers cross back.
+//   - The main thread builds deck.gl layers from those buffers using
+//     binary attributes (no per-cell objects, no accessor calls, no
+//     polygon normalisation), so a tile's first paint costs a few
+//     sub-layer instantiations rather than tens of milliseconds.
+//   - If workers are unavailable (or the worker fails to load its
+//     libraries) the same packing code runs on the main thread.
+//
 // Render strategy:
-//   - For LODs whose row groups carry `tile_id`s, render through a
-//     deck.gl TileLayer + an A5Tileset2D class. Each tile's
-//     `renderSubLayers` instantiates an A5Layer over the rows decoded
-//     from that tile's row group(s). Per-tile sub-layers stay on the
-//     GPU across pans → smooth zoom/pan.
-//   - For low-LOD single-row-group LODs (no tile_id), build one flat
-//     A5Layer over all the rows — there's only one row group anyway.
+//   - LODs whose row groups carry `tile_id`s render through a deck.gl
+//     TileLayer + an A5-aware Tileset2D; each tile is one
+//     SolidPolygonLayer (PolygonLayer when stroked and cells are big
+//     enough on screen to show a border).
+//   - Small LODs (no tile_id) render as one SolidPolygonLayer over the
+//     concatenation of their row groups.
 //
 // Dependencies:
-//   - window.A5ViewHyparquetReady : Promise<hyparquet module>
-//     (set by lib/hyparquet/hyparquet-bootstrap.js)
-//   - window.A5 : a5-js bridge (cellToBoundary for tile polygons)
-//   - window.A5View.tiling : shared helpers (boundary cache, pickLod,
-//     getViewportBbox, getA5Resolution, bboxKey).
+//   - window.A5ViewHyparquetReady / window.A5ViewHyparquetUrl (set by
+//     lib/hyparquet/hyparquet-bootstrap.js)
+//   - window.A5Ready / window.A5ViewA5Url (set by lib/a5-js/bridge.js)
+//   - window.A5View.tiling: getViewportBbox, bboxKey, getA5Resolution,
+//     pickLod, bigintToHex, REBUILD_THROTTLE_MS, MIN_HOLD_MS.
 //
 // ctx (provided by a5view.js):
 //   getOpacity()    current layer opacity
 //   getBeforeId()   MapLibre layer id to insert cell layers beneath
-//   onDataReady()   called whenever a row-group decode lands
+//   onDataReady()   called whenever a row group's geometry lands
 // =====================================================================
 (function () {
   var T = window.A5View = window.A5View || {};
@@ -40,185 +52,444 @@
   var LAZY = T.lazy = T.lazy || {};
   var log = function () { T.log.apply(null, arguments); };
 
-  function base64ToBytes(b64) {
-    var binary = atob(b64);
-    var n = binary.length;
-    var out = new Uint8Array(n);
-    for (var i = 0; i < n; i++) out[i] = binary.charCodeAt(i);
+  // Below this projected edge length (CSS px) cell borders are skipped:
+  // they would only smear the fill and double the per-tile layer count.
+  TILING.MIN_STROKE_PX = 3;
+
+  // ───────────────────────────────────────────────────────────────────
+  // Tile core: source handling + row-group decode + geometry packing.
+  //
+  // Written as a self-contained function of its two library modules so
+  // the very same code runs inside a Worker (stringified into a Blob)
+  // or on the main thread as a fallback. Nothing in here may reference
+  // closure variables from this file.
+  // ───────────────────────────────────────────────────────────────────
+  function tileCore(A5, hp) {
+    var file = null;      // AsyncBuffer
+    var metadata = null;
+    var rowOffsets = null;
+
+    function base64ToBytes(b64) {
+      var binary = atob(b64);
+      var n = binary.length;
+      var out = new Uint8Array(n);
+      for (var i = 0; i < n; i++) out[i] = binary.charCodeAt(i);
+      return out;
+    }
+
+    function bytesBuffer(bytes) {
+      return {
+        byteLength: bytes.byteLength,
+        slice: function (start, end) {
+          var s = start | 0;
+          var e = (end == null) ? bytes.byteLength : (end | 0);
+          return bytes.buffer.slice(bytes.byteOffset + s, bytes.byteOffset + e);
+        }
+      };
+    }
+
+    // AsyncBuffer over an HTTP URL with Range support. Slices are served
+    // from previously fetched ranges when possible; `prefetch` pulls a
+    // whole row group in one request.
+    function remoteBuffer(url, byteLength) {
+      var ranges = [];
+      function cached(start, end) {
+        for (var i = 0; i < ranges.length; i++) {
+          var r = ranges[i];
+          if (start >= r.start && end <= r.end) {
+            return r.bytes.buffer.slice(
+              r.bytes.byteOffset + (start - r.start),
+              r.bytes.byteOffset + (end - r.start)
+            );
+          }
+        }
+        return null;
+      }
+      function fetchRange(start, end) {
+        return fetch(url, { headers: { Range: "bytes=" + start + "-" + (end - 1) } })
+          .then(function (res) {
+            if (!res.ok) throw new Error("range request failed: " + res.status);
+            return res.arrayBuffer();
+          })
+          .then(function (buf) {
+            var bytes = new Uint8Array(buf);
+            if (bytes.byteLength !== end - start) {
+              if (bytes.byteLength === byteLength) {
+                // Server ignored the Range header: keep the whole file.
+                ranges = [{ start: 0, end: byteLength, bytes: bytes }];
+                return cached(start, end);
+              }
+              throw new Error("unexpected range length " + bytes.byteLength);
+            }
+            ranges.push({ start: start, end: end, bytes: bytes });
+            if (ranges.length > 4096) ranges.splice(0, ranges.length >> 1);
+            return buf;
+          });
+      }
+      return {
+        byteLength: byteLength,
+        slice: function (start, end) {
+          var s = start | 0;
+          var e = (end == null) ? byteLength : (end | 0);
+          var hit = cached(s, e);
+          return hit ? Promise.resolve(hit) : fetchRange(s, e);
+        },
+        prefetch: function (start, end) {
+          return cached(start, end) ? Promise.resolve() : fetchRange(start, end).then(function () {});
+        }
+      };
+    }
+
+    // Byte extent [start, end) of a row group: its column chunks are
+    // written contiguously.
+    function rowGroupByteRange(rg) {
+      var start = Infinity, end = 0;
+      for (var i = 0; i < rg.columns.length; i++) {
+        var md = rg.columns[i].meta_data;
+        if (!md) continue;
+        var off = Number(md.data_page_offset);
+        if (md.dictionary_page_offset != null && Number(md.dictionary_page_offset) < off) {
+          off = Number(md.dictionary_page_offset);
+        }
+        var stop = off + Number(md.total_compressed_size);
+        if (off < start) start = off;
+        if (stop > end) end = stop;
+      }
+      return { start: start, end: end };
+    }
+
+    function toBigIntCell(v) {
+      if (typeof v === "bigint") return v;
+      if (typeof v === "number") return BigInt(v);
+      if (v && typeof v.byteLength === "number" && v.byteLength === 8) {
+        var dv = new DataView(v.buffer || v, v.byteOffset || 0, 8);
+        return dv.getBigUint64(0, false);
+      }
+      if (typeof v === "string") return BigInt("0x" + v);
+      return BigInt(v);
+    }
+
+    // source: { b64 } or { url, bytes }. Resolves to the KV row-group
+    // index (array) once the footer has been read.
+    function open(source) {
+      var p;
+      if (source.url) {
+        file = remoteBuffer(source.url, Number(source.bytes));
+        p = hp.parquetMetadataAsync(file);
+      } else {
+        var bytes = base64ToBytes(source.b64);
+        file = bytesBuffer(bytes);
+        p = Promise.resolve(hp.parquetMetadata(
+          bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+        ));
+      }
+      return p.then(function (md) {
+        metadata = md;
+        var off = 0;
+        rowOffsets = md.row_groups.map(function (rg) {
+          var n = Number(rg.num_rows);
+          var o = { start: off, end: off + n };
+          off += n;
+          return o;
+        });
+        var kv = (md.key_value_metadata || []).filter(function (e) {
+          return e.key === "a5view_row_groups";
+        })[0];
+        if (!kv) throw new Error("parquet missing a5view_row_groups KV");
+        return JSON.parse(kv.value);
+      });
+    }
+
+    // Decode one row group and pack it:
+    //   cells      BigUint64Array(n)       cell ids
+    //   starts     Uint32Array(n + 1)      vertex start index per cell
+    //   positions  Float64Array(nv * 2)    [lon, lat, ...]
+    //   colors     Uint8Array(nv * 4)      RGBA per vertex, when present
+    //   values     Float32Array(n)         `_fill_value` per cell, when present
+    //   elevation  Float64Array(nv)        `_elevation` per vertex, when present
+    // deck.gl's polygon attributes are per vertex, so colour and
+    // elevation are expanded here rather than per cell.
+    function decode(rgIdx) {
+      var off = rowOffsets[rgIdx];
+      var ready = Promise.resolve();
+      if (file.prefetch) {
+        var range = rowGroupByteRange(metadata.row_groups[rgIdx]);
+        ready = file.prefetch(range.start, range.end);
+      }
+      return ready.then(function () {
+        return hp.parquetReadObjects({
+          file: file, metadata: metadata, rowStart: off.start, rowEnd: off.end
+        });
+      }).then(function (rows) {
+        var n = rows.length;
+        var hasColor = n > 0 && rows[0]._fill_r !== undefined;
+        var hasValue = n > 0 && rows[0]._fill_value !== undefined;
+        var hasElev = n > 0 && rows[0]._elevation !== undefined;
+        var cells = new BigUint64Array(n);
+        var rings = new Array(n);
+        var nv = 0;
+        for (var i = 0; i < n; i++) {
+          var cell = toBigIntCell(rows[i].pentagon);
+          cells[i] = cell;
+          var ring = A5.cellToBoundary(cell, { closedRing: false });
+          rings[i] = ring;
+          nv += ring.length;
+        }
+        var starts = new Uint32Array(n + 1);
+        var positions = new Float64Array(nv * 2);
+        var p = 0;
+        for (var j = 0; j < n; j++) {
+          starts[j] = p / 2;
+          var r = rings[j];
+          for (var k = 0; k < r.length; k++) {
+            positions[p++] = r[k][0];
+            positions[p++] = r[k][1];
+          }
+        }
+        starts[n] = nv;
+        var out = { rg: rgIdx, n: n, cells: cells, starts: starts, positions: positions };
+        var transfer = [cells.buffer, starts.buffer, positions.buffer];
+        if (hasColor) {
+          var colors = new Uint8Array(nv * 4);
+          for (var c = 0; c < n; c++) {
+            var row = rows[c];
+            for (var cv = starts[c]; cv < starts[c + 1]; cv++) {
+              colors[cv * 4] = row._fill_r; colors[cv * 4 + 1] = row._fill_g;
+              colors[cv * 4 + 2] = row._fill_b; colors[cv * 4 + 3] = row._fill_a;
+            }
+          }
+          out.colors = colors; transfer.push(colors.buffer);
+        }
+        if (hasValue) {
+          var values = new Float32Array(n);
+          for (var v = 0; v < n; v++) values[v] = rows[v]._fill_value;
+          out.values = values; transfer.push(values.buffer);
+        }
+        if (hasElev) {
+          var elev = new Float64Array(nv);
+          for (var e = 0; e < n; e++) {
+            var ev = rows[e]._elevation || 0;
+            for (var ei = starts[e]; ei < starts[e + 1]; ei++) elev[ei] = ev;
+          }
+          out.elevation = elev; transfer.push(elev.buffer);
+        }
+        out.transfer = transfer;
+        return out;
+      });
+    }
+
+    return { open: open, decode: decode };
+  }
+
+  // Worker entry: import the two libraries, then serve open / decode
+  // requests over postMessage. Runs from a Blob URL so no extra file
+  // has to be shipped; it inherits the page's origin.
+  function workerMain() {
+    var core = null;
+    var libs = null;
+    function loadLibs(urls) {
+      if (libs) return libs;
+      function tryImport(list) {
+        return import(list[0]).catch(function (e) {
+          if (list.length > 1) return tryImport(list.slice(1));
+          throw e;
+        });
+      }
+      libs = Promise.all([tryImport(urls.a5), tryImport(urls.hyparquet)]);
+      return libs;
+    }
+    self.onmessage = function (ev) {
+      var msg = ev.data;
+      if (msg.type === "open") {
+        loadLibs(msg.libs).then(function (mods) {
+          core = tileCore(mods[0], mods[1]);
+          return core.open(msg.source);
+        }).then(function (rgIndex) {
+          self.postMessage({ type: "opened", id: msg.id, rgIndex: rgIndex });
+        }).catch(function (e) {
+          self.postMessage({ type: "error", id: msg.id, message: String(e && e.message || e) });
+        });
+      } else if (msg.type === "decode") {
+        core.decode(msg.rg).then(function (out) {
+          var transfer = out.transfer; delete out.transfer;
+          out.type = "decoded"; out.id = msg.id;
+          self.postMessage(out, transfer);
+        }).catch(function (e) {
+          self.postMessage({ type: "error", id: msg.id, rg: msg.rg, message: String(e && e.message || e) });
+        });
+      }
+    };
+  }
+
+  function makeWorker() {
+    if (typeof Worker === "undefined" || typeof Blob === "undefined") return null;
+    try {
+      var src = tileCore.toString() + "\n(" + workerMain.toString() + ")();";
+      var url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
+      var w = new Worker(url);
+      URL.revokeObjectURL(url);
+      return w;
+    } catch (e) {
+      log("[a5view] worker unavailable, decoding on main thread:", e);
+      return null;
+    }
+  }
+
+  // Uniform promise-based front over either a worker or the in-thread
+  // core: { open(source) -> Promise<rgIndex>, decode(rg) -> Promise<packed>,
+  // close(), isWorker }
+  function makeDecoder(libUrls) {
+    var worker = makeWorker();
+    if (worker) {
+      var pending = new Map();
+      var nextId = 1;
+      worker.onmessage = function (ev) {
+        var msg = ev.data;
+        var p = pending.get(msg.id);
+        if (!p) return;
+        pending.delete(msg.id);
+        if (msg.type === "error") p.reject(new Error(msg.message));
+        else p.resolve(msg);
+      };
+      worker.onerror = function (e) {
+        pending.forEach(function (p) { p.reject(new Error("worker error: " + (e.message || e))); });
+        pending.clear();
+      };
+      function send(msg) {
+        return new Promise(function (resolve, reject) {
+          msg.id = nextId++;
+          pending.set(msg.id, { resolve: resolve, reject: reject });
+          worker.postMessage(msg);
+        });
+      }
+      return {
+        isWorker: true,
+        open: function (source) {
+          return send({ type: "open", source: source, libs: libUrls }).then(function (m) { return m.rgIndex; });
+        },
+        decode: function (rg) { return send({ type: "decode", rg: rg }); },
+        close: function () { worker.terminate(); pending.clear(); }
+      };
+    }
+    var core = null;
+    return {
+      isWorker: false,
+      open: function (source) {
+        return Promise.all([TILING.ensureA5(), window.A5ViewHyparquetReady]).then(function (mods) {
+          core = tileCore(mods[0], mods[1]);
+          return core.open(source);
+        });
+      },
+      decode: function (rg) { return core.decode(rg); },
+      close: function () {}
+    };
+  }
+
+  function libUrls() {
+    var a5 = [];
+    if (window.A5ViewA5Url) a5.push(window.A5ViewA5Url);
+    a5.push("https://cdn.jsdelivr.net/npm/a5-js@0.10.0/+esm");
+    var hyp = [];
+    if (window.A5ViewHyparquetUrl) hyp.push(window.A5ViewHyparquetUrl);
+    hyp.push("https://cdn.jsdelivr.net/npm/hyparquet@1.25.6/+esm");
+    return { a5: a5, hyparquet: hyp };
+  }
+
+  function absoluteUrl(url) {
+    try { return new URL(url, window.location.href).href; } catch (_) { return url; }
+  }
+
+  // Concatenate packed row groups into one geometry block.
+  function concatPacked(parts) {
+    if (parts.length === 1) return parts[0];
+    var n = 0, nv = 0, hasColor = true, hasValue = true, hasElev = true;
+    parts.forEach(function (p) {
+      n += p.n; nv += p.starts[p.n];
+      hasColor = hasColor && !!p.colors; hasValue = hasValue && !!p.values; hasElev = hasElev && !!p.elevation;
+    });
+    var out = {
+      n: n,
+      cells: new BigUint64Array(n),
+      starts: new Uint32Array(n + 1),
+      positions: new Float64Array(nv * 2),
+      colors: hasColor ? new Uint8Array(nv * 4) : null,
+      values: hasValue ? new Float32Array(n) : null,
+      elevation: hasElev ? new Float64Array(nv) : null
+    };
+    var ci = 0, vi = 0;
+    parts.forEach(function (p) {
+      out.cells.set(p.cells, ci);
+      out.positions.set(p.positions, vi * 2);
+      for (var i = 0; i < p.n; i++) out.starts[ci + i] = p.starts[i] + vi;
+      if (hasColor) out.colors.set(p.colors, vi * 4);
+      if (hasValue) out.values.set(p.values, ci);
+      if (hasElev) out.elevation.set(p.elevation, vi);
+      ci += p.n; vi += p.starts[p.n];
+    });
+    out.starts[n] = vi;
     return out;
   }
 
-  // hyparquet wants an AsyncBuffer: { byteLength, slice(start, end) }.
-  function makeAsyncBuffer(bytes) {
-    return {
-      byteLength: bytes.byteLength,
-      slice: function (start, end) {
-        var s = start | 0;
-        var e = (end == null) ? bytes.byteLength : (end | 0);
-        return bytes.buffer.slice(bytes.byteOffset + s, bytes.byteOffset + e);
-      }
-    };
-  }
-
-  // AsyncBuffer over an HTTP URL with Range support (the Shiny path).
-  // Slices are served from previously fetched ranges when possible;
-  // callers prefetch whole row groups with `prefetch(start, end)` so a
-  // row-group decode costs one request rather than one per column.
-  function makeRemoteBuffer(url, byteLength) {
-    var ranges = []; // [{start, end, bytes}]
-    function cached(start, end) {
-      for (var i = 0; i < ranges.length; i++) {
-        var r = ranges[i];
-        if (start >= r.start && end <= r.end) {
-          return r.bytes.buffer.slice(
-            r.bytes.byteOffset + (start - r.start),
-            r.bytes.byteOffset + (end - r.start)
-          );
-        }
-      }
-      return null;
-    }
-    function fetchRange(start, end) {
-      return fetch(url, { headers: { Range: "bytes=" + start + "-" + (end - 1) } })
-        .then(function (res) {
-          if (!res.ok) throw new Error("range request failed: " + res.status);
-          return res.arrayBuffer();
-        })
-        .then(function (buf) {
-          var bytes = new Uint8Array(buf);
-          if (bytes.byteLength !== end - start) {
-            // Server ignored the Range header and sent the whole file.
-            if (bytes.byteLength === byteLength) {
-              ranges = [{ start: 0, end: byteLength, bytes: bytes }];
-              return cached(start, end);
-            }
-            throw new Error("unexpected range length " + bytes.byteLength);
-          }
-          ranges.push({ start: start, end: end, bytes: bytes });
-          if (ranges.length > 4096) ranges.splice(0, ranges.length >> 1);
-          return buf;
-        });
-    }
-    return {
-      byteLength: byteLength,
-      slice: function (start, end) {
-        var s = start | 0;
-        var e = (end == null) ? byteLength : (end | 0);
-        var hit = cached(s, e);
-        return hit ? Promise.resolve(hit) : fetchRange(s, e);
-      },
-      prefetch: function (start, end) {
-        return cached(start, end) ? Promise.resolve() : fetchRange(start, end).then(function () {});
-      }
-    };
-  }
-
-  // Byte extent [start, end) of a parquet row group: the column chunks
-  // of a row group are written contiguously.
-  function rowGroupByteRange(rg) {
-    var start = Infinity, end = 0;
-    for (var i = 0; i < rg.columns.length; i++) {
-      var md = rg.columns[i].meta_data;
-      if (!md) continue;
-      var off = Number(md.dictionary_page_offset != null ? md.dictionary_page_offset : md.data_page_offset);
-      if (md.dictionary_page_offset != null && Number(md.data_page_offset) < off) off = Number(md.data_page_offset);
-      var stop = off + Number(md.total_compressed_size);
-      if (off < start) start = off;
-      if (stop > end) end = stop;
-    }
-    return { start: start, end: end };
-  }
-
-  // Normalise a pentagon cell value coming back from hyparquet into a
-  // BigInt. a5R writes A5 ids as INT64, hyparquet decodes as bigint
-  // already; defensive paths cover other shapes (FIXED_LEN_BYTE_ARRAY,
-  // hex string).
-  function toBigIntCell(v) {
-    if (typeof v === "bigint") return v;
-    if (typeof v === "number") return BigInt(v);
-    if (v && typeof v.byteLength === "number" && v.byteLength === 8) {
-      var dv = new DataView(v.buffer || v, v.byteOffset || 0, 8);
-      return dv.getBigUint64(0, false);
-    }
-    if (typeof v === "string") return BigInt("0x" + v);
-    return BigInt(v);
-  }
-
-  // Test whether a row-group bbox overlaps a query bbox. The query bbox
-  // may straddle the antimeridian (west > east); split if so.
-  function bboxOverlap(rg, q) {
+  // Test whether a [w, s, e, n] bbox overlaps a query bbox that may
+  // straddle the antimeridian (west > east).
+  function bboxOverlapXY(b, q) {
     if (q.west <= q.east) {
-      return !(rg.east < q.west || rg.west > q.east ||
-               rg.north < q.south || rg.south > q.north);
+      return !(b[2] < q.west || b[0] > q.east || b[3] < q.south || b[1] > q.north);
     }
-    return bboxOverlap(rg, { west: q.west, east: 180, south: q.south, north: q.north }) ||
-           bboxOverlap(rg, { west: -180, east: q.east, south: q.south, north: q.north });
+    return (!(b[2] < q.west || b[0] > 180 || b[3] < q.south || b[1] > q.north)) ||
+           (!(b[2] < -180 || b[0] > q.east || b[3] < q.south || b[1] > q.north));
   }
 
-  // deck.gl diffs `data` by reference; a fresh array per rebuild would
-  // make TileLayer reload every tile on each redraw.
   var EMPTY_DATA = [];
 
   LAZY.createRenderer = function (ctx) {
-    var fileBytes = null;
-    var asyncBuffer = null;
-    var metadata = null;
-    var rgIndex = null;             // Array of KV entries (one per row group)
-    var rgRowOffsets = null;        // Array<{start, end, num_rows}>
-    var decodedCache = new Map();   // rg -> Array<rowObj>
+    var decoder = null;
+    var rgIndex = null;             // KV entries, one per row group
+    var decodedCache = new Map();   // rg -> packed geometry
     var pendingDecodes = new Map(); // rg -> Promise
     var loadVersion = 0;
     var ready = false;
-    // Decoded rows indexed by (lod, hex cell id), filled as row groups
-    // decode. Backs hover: a cell is hoverable only if it is in the
-    // data at the LOD currently on screen.
-    var rowsByLod = new Map();      // lod -> Map<hex, row>
 
     // Per-LOD lookup tables built from rgIndex.
-    //   tilesByLod : Map<lod, Map<tileIdHex, [rgIdx, ...]>>
-    //   bboxByLod  : Map<lod, Map<tileIdHex, [w, s, e, n]>>  (data-extent bbox)
-    //   flatByLod  : Map<lod, [rgIdx, ...]>           (low LODs without tile_id)
-    var tilesByLod = new Map();
-    var bboxByLod  = new Map();
-    var flatByLod  = new Map();
-    // Cached row arrays for the flat path: stable references so deck.gl
-    // sees the same `data` on rebuilds and skips GPU re-upload.
-    var flatRowsCache = new Map(); // (loadVersion + lod) -> {rows, complete}
+    var tilesByLod = new Map();     // lod -> Map<tileHex, [rgIdx, ...]>
+    var bboxByLod = new Map();      // lod -> Map<tileHex, [w, s, e, n]>
+    var flatByLod = new Map();      // lod -> [rgIdx, ...]
+    var flatGeomCache = new Map();  // lod -> { count, geom }
+    var tileGeomCache = new Map();  // lod -> Map<tileHex, { count, geom }>
+    var tilesetClassesByLod = new Map();
+    var layerMemo = new Map();      // layerId -> { key, layer }
+    var dirtyTiles = new Map();     // lod -> Set<tileHex>
+    // Hover lookup: lod -> { index: Map<hex, [rg, i]>, pending: [rg, ...] }
+    var rowsByLod = new Map();
 
-    // Cap concurrent parquetReadObjects calls. Bounded mainly to keep
-    // 1000s-of-tiles bursts from runaway-queueing on the microtask
-    // queue; for typical viewport sizes this is large enough to drain
-    // in one continuous burst, minimising blank-tile time on zoom.
-    var MAX_CONCURRENT_DECODES = 32;
-    var decodeQueue = []; // FIFO of pending rgIdx requests
+    var MAX_CONCURRENT_DECODES = 8;
+    var decodeQueue = [];
 
-    // ctx.onDataReady → scheduleRebuild in the host, which already
-    // throttles at REBUILD_THROTTLE_MS (32 ms). No extra debounce
-    // needed — fast rebuilds are exactly what we want for incremental
-    // tile fade-in.
-    function scheduleDataReady() {
-      if (ctx.onDataReady) ctx.onDataReady();
-    }
+    var lastBuiltLod = null;
+    var prevWarmLod = null;
+    var lodChangedAt = 0;
+    var holdTimer = null;
 
+    var nowMs = (typeof performance !== "undefined" && performance.now)
+      ? function () { return performance.now(); }
+      : function () { return Date.now(); };
 
     function reset() {
-      fileBytes = null;
-      asyncBuffer = null;
-      metadata = null;
+      if (decoder) decoder.close();
+      decoder = null;
       rgIndex = null;
-      rgRowOffsets = null;
       decodedCache = new Map();
       pendingDecodes = new Map();
       decodeQueue = [];
       tilesByLod = new Map();
       bboxByLod = new Map();
       flatByLod = new Map();
-      flatRowsCache = new Map();
-      tileRowsCacheByLod = new Map();
+      flatGeomCache = new Map();
+      tileGeomCache = new Map();
       tilesetClassesByLod = new Map();
-      rowsByLod = new Map();
-      dirtyTiles = new Map();
       layerMemo = new Map();
+      dirtyTiles = new Map();
+      rowsByLod = new Map();
       lastBuiltLod = null;
       prevWarmLod = null;
       lodChangedAt = 0;
@@ -227,72 +498,20 @@
       loadVersion++;
     }
 
-    // Prefetch the low-LOD (no tile_id) row groups eagerly. Those are
-    // the wide-zoom entries — small and almost always needed by the
-    // first render. We DON'T prefetch tile-bucketed row groups: with
-    // ~256 rows each they'd individually pass any sensible row-count
-    // threshold, and there can be thousands of them.
-
-    var nowMs = (typeof performance !== "undefined" && performance.now)
-      ? function () { return performance.now(); }
-      : function () { return Date.now(); };
-
-    // source: { b64 } (inline, static widgets) or { url, bytes } (served
-    // by Shiny with Range support; only the footer and the row groups
-    // in view are ever fetched).
+    // source: { b64 } (inline) or { url, bytes } (served with Range
+    // support). Resolves once the row-group index is known; row groups
+    // decode on demand from then on.
     function init(source) {
       reset();
       var thisLoad = loadVersion;
       var t0 = nowMs();
-      var remote = !!source.url;
-      log("[a5view] lazy.init: " + (remote ? "url " + source.url + " bytes=" + source.bytes
-                                           : "inline b64=" + (source.b64 && source.b64.length)));
-      if (remote) {
-        fileBytes = null;
-        asyncBuffer = makeRemoteBuffer(source.url, Number(source.bytes));
-      } else {
-        fileBytes = base64ToBytes(source.b64);
-        asyncBuffer = makeAsyncBuffer(fileBytes);
-      }
-      var tBase64 = nowMs();
-
-      return window.A5ViewHyparquetReady.then(function (hp) {
-        if (remote) return hp.parquetMetadataAsync(asyncBuffer);
-        return hp.parquetMetadata(fileBytes.buffer.slice(
-          fileBytes.byteOffset,
-          fileBytes.byteOffset + fileBytes.byteLength
-        ));
-      }).then(function (md) {
+      if (source.url) source = { url: absoluteUrl(source.url), bytes: source.bytes };
+      log("[a5view] lazy.init: " + (source.url ? "url " + source.url + " bytes=" + source.bytes
+                                               : "inline b64=" + (source.b64 && source.b64.length)));
+      decoder = makeDecoder(libUrls());
+      return decoder.open(source).then(function (index) {
         if (thisLoad !== loadVersion) return;
-        var tMeta = nowMs();
-        metadata = md;
-
-        var kvs = md.key_value_metadata || [];
-        for (var i = 0; i < kvs.length; i++) {
-          if (kvs[i].key === "a5view_row_groups") {
-            try { rgIndex = JSON.parse(kvs[i].value); }
-            catch (e) { console.error("[a5view] bad row-group KV metadata:", e); }
-            break;
-          }
-        }
-        if (!rgIndex) {
-          console.error("[a5view] parquet missing a5view_row_groups KV");
-          return;
-        }
-
-        rgRowOffsets = new Array(md.row_groups.length);
-        var off = 0;
-        for (var j = 0; j < md.row_groups.length; j++) {
-          var rg = md.row_groups[j];
-          var n = Number(rg.num_rows);
-          rgRowOffsets[j] = { start: off, end: off + n, num_rows: n };
-          off += n;
-        }
-
-        // Index row groups by LOD. tile_id present → tile bucket (also
-        // build the per-tile bbox by union'ing each contributing rg's
-        // bbox so we never call cellToBoundary at runtime); absent →
-        // flat (low-LOD single row group).
+        rgIndex = index;
         for (var k = 0; k < rgIndex.length; k++) {
           var entry = rgIndex[k];
           var lod = entry.lod_min;
@@ -302,18 +521,16 @@
             var lst = byTile.get(entry.tile_id);
             if (!lst) { lst = []; byTile.set(entry.tile_id, lst); }
             lst.push(entry.rg);
-
             var bboxByTile = bboxByLod.get(lod);
             if (!bboxByTile) { bboxByTile = new Map(); bboxByLod.set(lod, bboxByTile); }
             var bb = bboxByTile.get(entry.tile_id);
             if (bb) {
-              if (entry.west  < bb[0]) bb[0] = entry.west;
+              if (entry.west < bb[0]) bb[0] = entry.west;
               if (entry.south < bb[1]) bb[1] = entry.south;
-              if (entry.east  > bb[2]) bb[2] = entry.east;
+              if (entry.east > bb[2]) bb[2] = entry.east;
               if (entry.north > bb[3]) bb[3] = entry.north;
             } else {
-              bboxByTile.set(entry.tile_id,
-                [entry.west, entry.south, entry.east, entry.north]);
+              bboxByTile.set(entry.tile_id, [entry.west, entry.south, entry.east, entry.north]);
             }
           } else {
             var flat = flatByLod.get(lod);
@@ -321,28 +538,18 @@
             flat.push(entry.rg);
           }
         }
-
         ready = true;
-        var tReady = nowMs();
-        log(
-          "[a5view] init: base64 " + (tBase64 - t0).toFixed(0) + "ms, " +
-          "metadata " + (tMeta - tBase64).toFixed(0) + "ms, " +
-          "kv+ready " + (tReady - tMeta).toFixed(0) + "ms, " +
-          "rg=" + rgIndex.length + " tiledLods=" + tilesByLod.size +
-          " flatLods=" + flatByLod.size
-        );
-
-        // Prefetch only the low-LOD flat row groups (no tile_id). These
-        // are typically a few entries with up to a few thousand rows,
-        // covering wide-zoom paint. Tile-bucketed row groups stay lazy.
+        log("[a5view] init: " + (nowMs() - t0).toFixed(0) + "ms, rg=" + rgIndex.length +
+            " tiledLods=" + tilesByLod.size + " flatLods=" + flatByLod.size +
+            (decoder.isWorker ? " (worker)" : " (main thread)"));
+        // The small, non-tiled LODs cover wide zooms and are almost
+        // always needed first; fetch them eagerly.
         for (var p = 0; p < rgIndex.length; p++) {
           if (!rgIndex[p].tile_id) decodeRowGroup(rgIndex[p].rg);
         }
       });
     }
 
-    // Drain the decode queue while we have headroom. Called on completion
-    // of every in-flight decode.
     function pumpDecodeQueue() {
       while (pendingDecodes.size < MAX_CONCURRENT_DECODES && decodeQueue.length > 0) {
         var next = decodeQueue.shift();
@@ -353,46 +560,26 @@
 
     function startDecode(rgIdx) {
       var thisLoad = loadVersion;
-      var off = rgRowOffsets[rgIdx];
       var t0 = nowMs();
-      var p = window.A5ViewHyparquetReady.then(function (hp) {
-        if (asyncBuffer.prefetch) {
-          var range = rowGroupByteRange(metadata.row_groups[rgIdx]);
-          return asyncBuffer.prefetch(range.start, range.end).then(function () { return hp; });
-        }
-        return hp;
-      }).then(function (hp) {
-        return hp.parquetReadObjects({
-          file: asyncBuffer,
-          metadata: metadata,
-          rowStart: off.start,
-          rowEnd: off.end
-        });
-      }).then(function (rows) {
+      var p = decoder.decode(rgIdx).then(function (packed) {
         pendingDecodes.delete(rgIdx);
-        if (thisLoad !== loadVersion) { pumpDecodeQueue(); return []; }
-        decodedCache.set(rgIdx, rows);
-        markTileDirty(rgIndex[rgIdx]);
-        for (var i = 0; i < rows.length; i++) {
-          var row = rows[i];
-          var cell = row.__pent || (row.__pent = toBigIntCell(row.pentagon));
-          var byHex = rowsByLod.get(row._lod);
-          if (!byHex) { byHex = new Map(); rowsByLod.set(row._lod, byHex); }
-          byHex.set(TILING.bigintToHex(cell), row);
-        }
+        if (thisLoad !== loadVersion) { pumpDecodeQueue(); return null; }
+        decodedCache.set(rgIdx, packed);
+        var entry = rgIndex[rgIdx];
+        var byLod = rowsByLod.get(entry.lod_min);
+        if (!byLod) { byLod = { index: new Map(), pending: [] }; rowsByLod.set(entry.lod_min, byLod); }
+        byLod.pending.push(rgIdx);
+        markTileDirty(entry);
         var dt = nowMs() - t0;
-        if (dt > 5) {
-          log("[a5view] decoded rg" + rgIdx + " (" + rows.length +
-              " rows) in " + dt.toFixed(0) + "ms");
-        }
-        scheduleDataReady();
+        if (dt > 50) log("[a5view] rg" + rgIdx + " (" + packed.n + " cells) in " + dt.toFixed(0) + "ms");
+        if (ctx.onDataReady) ctx.onDataReady();
         pumpDecodeQueue();
-        return rows;
+        return packed;
       }).catch(function (err) {
         pendingDecodes.delete(rgIdx);
         console.error("[a5view] row-group", rgIdx, "decode failed:", err);
         pumpDecodeQueue();
-        return [];
+        return null;
       });
       pendingDecodes.set(rgIdx, p);
       return p;
@@ -402,57 +589,17 @@
       if (decodedCache.has(rgIdx)) return Promise.resolve(decodedCache.get(rgIdx));
       var pending = pendingDecodes.get(rgIdx);
       if (pending) return pending;
-      // At capacity: queue and return a placeholder. Fire-and-forget
-      // callers (getTileData, buildFlatLayer/buildTileRows) don't use
-      // the returned promise; they re-check decodedCache on the next
-      // ctx.onDataReady-driven rebuild.
       if (pendingDecodes.size >= MAX_CONCURRENT_DECODES) {
         if (decodeQueue.indexOf(rgIdx) === -1) decodeQueue.push(rgIdx);
-        return Promise.resolve([]);
+        return Promise.resolve(null);
       }
       return startDecode(rgIdx);
     }
 
-    function buildA5LayerProps(x, data, layerId, updateKey) {
-      var hasFill = x.fill_per_cell;
-      var uniformFill = x.fill_color || [116, 172, 144, 255];
-      var getFillColor = hasFill
-        ? function (d) { return [d._fill_r, d._fill_g, d._fill_b, d._fill_a]; }
-        : uniformFill;
+    // ── Layers ──────────────────────────────────────────────────────
 
-      var props = {
-        id: layerId,
-        data: data,
-        getPentagon: function (d) {
-          // hyparquet may yield bigint, number, or bytes; A5Layer wants
-          // BigInt. Cache on the row to avoid repeating the cast.
-          return d.__pent || (d.__pent = toBigIntCell(d.pentagon));
-        },
-        getFillColor: getFillColor,
-        opacity: ctx.getOpacity(),
-        pickable: false,
-        extruded: x.extruded,
-        elevationScale: x.elevation_scale,
-        stroked: x.stroked,
-        getLineColor: x.line_color || [0, 0, 0, 0],
-        getLineWidth: x.line_width || 1,
-        lineWidthUnits: "pixels",
-        beforeId: ctx.getBeforeId(),
-        updateTriggers: {
-          getFillColor: updateKey,
-          getElevation: updateKey
-        }
-      };
-      if (x.extruded) {
-        props.getElevation = function (d) { return d._elevation || 0; };
-      }
-      return props;
-    }
-
-    // Layer instances are memoised by a key of everything they depend
-    // on, so a hover or pan redraw hands deck.gl the same objects and
-    // it skips the diff entirely.
-    var layerMemo = new Map(); // layerId -> { key, layer }
+    // Layer instances are memoised on everything they depend on, so a
+    // hover or pan redraw hands deck.gl the same objects.
     function memoLayer(layerId, key, make) {
       var m = layerMemo.get(layerId);
       if (m && m.key === key) return m.layer;
@@ -460,175 +607,53 @@
       layerMemo.set(layerId, { key: key, layer: layer });
       return layer;
     }
-    function styleKey(x) {
-      return [ctx.getOpacity(), ctx.getBeforeId(), x.stroked, x.line_width,
+
+    // Projected edge length of a cell at `lod` (CSS px) at the current
+    // view; decides whether borders are worth drawing.
+    function cellEdgePx(lod, viewport) {
+      if (!window.A5 || !window.A5.cellEdgeLengthAvg) return Infinity;
+      var edgeM = window.A5.cellEdgeLengthAvg(lod);
+      var lat = (viewport.latitude || 0) * Math.PI / 180;
+      var mPerPx = 40075016.686 * Math.cos(lat) / (512 * Math.pow(2, viewport.zoom || 0));
+      return edgeM / mPerPx;
+    }
+
+    function styleKey(x, stroked) {
+      return [ctx.getOpacity(), ctx.getBeforeId(), stroked, x.line_width,
               x.extruded, x.elevation_scale, x.fill_per_cell].join("|");
     }
 
-    function buildA5Layer(x, data, layerId, updateKey) {
-      return memoLayer(layerId, updateKey + "|" + styleKey(x), function () {
-        return new window.deck.A5Layer(buildA5LayerProps(x, data, layerId, updateKey));
-      });
-    }
-
-    // Flat path: low LODs without tile bucketing. One A5Layer over the
-    // concatenated rows of every row group at this LOD. Decodes on
-    // demand; rebuild fires when row groups land. Rows array is cached
-    // by (load, lod) so deck.gl gets the same data reference across
-    // rebuilds and skips re-uploading buffers.
-    function buildFlatLayer(x, lod, rgs) {
-      var cacheKey = loadVersion + "|" + lod;
-      var cached = flatRowsCache.get(cacheKey);
-      var rows, complete;
-      if (cached && cached.complete) {
-        rows = cached.rows;
-        complete = true;
-      } else {
-        rows = [];
-        complete = true;
-        for (var i = 0; i < rgs.length; i++) {
-          var d = decodedCache.get(rgs[i]);
-          if (d) {
-            for (var j = 0; j < d.length; j++) {
-              if (d[j]._lod === lod) rows.push(d[j]);
-            }
-          } else {
-            complete = false;
-            decodeRowGroup(rgs[i]);
-          }
+    // One SolidPolygonLayer (or PolygonLayer with stroke) over a packed
+    // geometry block, via binary attributes.
+    function buildGeomLayer(x, geom, layerId, stroked, extra) {
+      var data = {
+        length: geom.n,
+        startIndices: geom.starts,
+        attributes: {
+          getPolygon: { value: geom.positions, size: 2 }
         }
-        flatRowsCache.set(cacheKey, { rows: rows, complete: complete });
-      }
-      if (rows.length === 0) return null;
-      var key = "flat|" + cacheKey + "|" + rows.length + "|" + (complete ? 1 : 0);
-      return buildA5Layer(x, rows, "a5-lazy-flat-" + lod, key);
-    }
-
-    // deck.gl only regenerates a tile's sub-layers when `tile.layers` is
-    // null. TileLayer declares getTileData / renderSubLayers with
-    // `compare: false`, so handing it a fresh layer instance after a
-    // decode lands does nothing by itself; we null the affected tiles
-    // explicitly and ask the layer for an update.
-    var dirtyTiles = new Map(); // lod -> Set<tileHex>
-    function markTileDirty(entry) {
-      if (!entry || !entry.tile_id) return;
-      var set = dirtyTiles.get(entry.lod_min);
-      if (!set) { set = new Set(); dirtyTiles.set(entry.lod_min, set); }
-      set.add(entry.tile_id);
-      flushDirtyTiles(entry.lod_min);
-    }
-    function flushDirtyTiles(lod) {
-      var set = dirtyTiles.get(lod);
-      if (!set || set.size === 0) return;
-      var m = layerMemo.get("a5-lazy-tiles-lod" + lod + "-v" + loadVersion);
-      var tileset = m && m.layer.state && m.layer.state.tileset;
-      if (!tileset) return; // deck hasn't applied the layer yet; retried on next build
-      var touched = false;
-      var tiles = tileset.tiles || tileset._tiles || [];
-      for (var i = 0; i < tiles.length; i++) {
-        var t = tiles[i];
-        if (t.index && set.has(t.index.i)) { t.layers = null; touched = true; }
-      }
-      set.clear();
-      if (touched && typeof m.layer.setNeedsUpdate === "function") m.layer.setNeedsUpdate();
-    }
-
-    // Tiled path: deck.gl TileLayer with a custom A5 Tileset2D over
-    // our row-group tiles. The Tileset2D iterates bboxByTile (the data
-    // extents we computed in R) for visible-tile selection, and
-    // disables deck.gl's parent-chain walk by returning null from
-    // getParentIndex — A5 cells form a hierarchy but it's not the
-    // quadtree shape deck.gl assumes, and walking it creates phantom
-    // tiles for every coarser level that froze the page last time we
-    // tried this. The flat base layer (rendered separately by
-    // buildLodLayer) covers the fade-in role that the parent walk
-    // would have played.
-    //
-    // Per-(lod, tileId) cache of materialised row arrays so deck.gl
-    // sub-layers see the same `data` reference between rebuilds and
-    // skip GPU buffer re-uploads.
-    var tileRowsCacheByLod = new Map(); // lod -> Map<tileId, { key, rows }>
-    // Tileset2D class cache, keyed by (lod, loadVersion). Rebuilt only
-    // on data swap.
-    var tilesetClassesByLod = new Map();
-
-    function bboxOverlapXY(b, q) {
-      if (q.west <= q.east) {
-        return !(b[2] < q.west || b[0] > q.east ||
-                 b[3] < q.south || b[1] > q.north);
-      }
-      return (!(b[2] < q.west || b[0] > 180     || b[3] < q.south || b[1] > q.north)) ||
-             (!(b[2] < -180   || b[0] > q.east  || b[3] < q.south || b[1] > q.north));
-    }
-
-    // Materialise polygon entries for one tile, cached per (lod, tileId)
-    // so deck.gl sees the same data reference until the tile's decoded
-    // set grows. We pre-resolve cell boundaries here so the per-tile
-    // sub-layer can be a flat SolidPolygonLayer / PolygonLayer rather
-    // than the A5Layer CompositeLayer (CompositeLayer-inside-TileLayer
-    // produces a 4-level layer tree per tile and freezes the page at
-    // ~75 visible tiles).
-    function buildTilePolys(lod, hex, rgs) {
-      var perLod = tileRowsCacheByLod.get(lod);
-      if (!perLod) { perLod = new Map(); tileRowsCacheByLod.set(lod, perLod); }
-      var decodedCount = 0;
-      for (var i = 0; i < rgs.length; i++) {
-        if (decodedCache.has(rgs[i])) decodedCount++;
-      }
-      if (decodedCount === 0) return null;
-      var key = loadVersion + "|" + decodedCount;
-      var cached = perLod.get(hex);
-      if (cached && cached.key === key) return cached.entries;
-      var A5 = window.A5;
-      var entries = [];
-      for (var j = 0; j < rgs.length; j++) {
-        var d = decodedCache.get(rgs[j]);
-        if (!d) continue;
-        for (var k = 0; k < d.length; k++) {
-          var r = d[k];
-          if (r._lod !== lod) continue;
-          var cell = r.__pent || (r.__pent = toBigIntCell(r.pentagon));
-          var entry = {
-            polygon: TILING.cachedBoundary(A5, cell),
-            pentagon: cell,
-            r: r._fill_r, g: r._fill_g, b: r._fill_b, a: r._fill_a,
-            elevation: r._elevation
-          };
-          entries.push(entry);
-        }
-      }
-      perLod.set(hex, { key: key, entries: entries });
-      return entries;
-    }
-
-    // Build a SolidPolygonLayer (or PolygonLayer when stroke is on)
-    // from per-tile polygon entries. Flat layer tree — no
-    // CompositeLayer nesting.
-    function buildPolygonSubLayer(x, entries, layerId, updateKey) {
-      var hasFill = x.fill_per_cell;
-      var uniformFill = x.fill_color || [116, 172, 144, 255];
-      var getFillColor = hasFill
-        ? function (d) { return [d.r, d.g, d.b, d.a]; }
-        : uniformFill;
-
+      };
       var props = {
         id: layerId,
-        data: entries,
-        getPolygon: function (d) { return d.polygon; },
-        getFillColor: getFillColor,
+        data: data,
+        _normalize: false,
+        _windingOrder: "CCW",
+        positionFormat: "XY",
         opacity: ctx.getOpacity(),
         pickable: false,
         extruded: x.extruded,
-        elevationScale: x.elevation_scale,
-        updateTriggers: {
-          getFillColor: updateKey,
-          getElevation: updateKey
-        }
+        elevationScale: x.elevation_scale
       };
-      if (x.extruded) {
-        props.getElevation = function (d) { return d.elevation || 0; };
+      if (x.fill_per_cell && geom.colors) {
+        data.attributes.getFillColor = { value: geom.colors, size: 4 };
+      } else {
+        props.getFillColor = x.fill_color || [116, 172, 144, 255];
       }
-      if (x.stroked) {
+      if (x.extruded && geom.elevation) {
+        data.attributes.getElevation = { value: geom.elevation, size: 1 };
+      }
+      for (var k in extra) props[k] = extra[k];
+      if (stroked) {
         props.stroked = true;
         props.filled = true;
         props.getLineColor = x.line_color || [0, 0, 0, 0];
@@ -639,8 +664,102 @@
       return new window.deck.SolidPolygonLayer(props);
     }
 
-    // Custom Tileset2D: atomic A5 tiles, no parent walks.
-    function makeLazyA5TilesetClass(lod, bboxByTile) {
+    // Flat path: one layer over every decoded row group of a small LOD.
+    function buildFlatLayer(x, lod, rgs, stroked) {
+      var count = 0;
+      var parts = [];
+      for (var i = 0; i < rgs.length; i++) {
+        var g = decodedCache.get(rgs[i]);
+        if (g) { parts.push(g); count++; }
+        else decodeRowGroup(rgs[i]);
+      }
+      if (parts.length === 0) return null;
+      var cached = flatGeomCache.get(lod);
+      if (!cached || cached.count !== count) {
+        cached = { count: count, geom: concatPacked(parts) };
+        flatGeomCache.set(lod, cached);
+      }
+      var layerId = "a5-lazy-flat-lod" + lod + "-v" + loadVersion;
+      return memoLayer(layerId, count + "|" + styleKey(x, stroked), function () {
+        return buildGeomLayer(x, cached.geom, layerId, stroked, { beforeId: ctx.getBeforeId() });
+      });
+    }
+
+    // Geometry for one tile, cached until more of its row groups land.
+    function tileGeometry(lod, hex, rgs) {
+      var parts = [];
+      for (var i = 0; i < rgs.length; i++) {
+        var g = decodedCache.get(rgs[i]);
+        if (g) parts.push(g);
+      }
+      if (parts.length === 0) return null;
+      var perLod = tileGeomCache.get(lod);
+      if (!perLod) { perLod = new Map(); tileGeomCache.set(lod, perLod); }
+      var cached = perLod.get(hex);
+      if (cached && cached.count === parts.length) return cached.geom;
+      cached = { count: parts.length, geom: concatPacked(parts) };
+      perLod.set(hex, cached);
+      return cached.geom;
+    }
+
+    // deck.gl only regenerates a tile's sub-layers when `tile.layers` is
+    // null. TileLayer declares getTileData / renderSubLayers with
+    // `compare: false`, so a fresh layer instance after a decode lands
+    // does nothing by itself; we null the affected tiles explicitly.
+    function markTileDirty(entry) {
+      if (!entry || !entry.tile_id) return;
+      var set = dirtyTiles.get(entry.lod_min);
+      if (!set) { set = new Set(); dirtyTiles.set(entry.lod_min, set); }
+      set.add(entry.tile_id);
+      flushDirtyTiles(entry.lod_min);
+    }
+    // Sub-layer instantiation is spread over frames: a flush releases at
+    // most MAX_TILES_PER_FLUSH dirty tiles, and renderSubLayers builds
+    // at most MAX_NEW_TILES_PER_PASS tiles per synchronous pass (deck
+    // instantiates them after the callbacks return, at roughly 2 ms per
+    // 1k cells), deferring the rest to the next redraw.
+    var MAX_TILES_PER_FLUSH = 8;
+    var MAX_NEW_TILES_PER_PASS = 6;
+    var buildPassCount = null;
+    function withinBuildBudget() {
+      if (buildPassCount == null) {
+        // First call of a synchronous pass; the timeout fires once the
+        // pass (and the frame it ran in) has finished.
+        buildPassCount = 0;
+        setTimeout(function () { buildPassCount = null; }, 0);
+      }
+      buildPassCount++;
+      return buildPassCount <= MAX_NEW_TILES_PER_PASS;
+    }
+    function deferTile(lod, hex) {
+      var set = dirtyTiles.get(lod);
+      if (!set) { set = new Set(); dirtyTiles.set(lod, set); }
+      set.add(hex);
+      if (ctx.onDataReady) ctx.onDataReady();
+    }
+    function flushDirtyTiles(lod) {
+      var set = dirtyTiles.get(lod);
+      if (!set || set.size === 0) return;
+      var m = layerMemo.get("a5-lazy-tiles-lod" + lod + "-v" + loadVersion);
+      var tileset = m && m.layer.state && m.layer.state.tileset;
+      if (!tileset) return; // deck hasn't applied the layer yet; retried on next build
+      var released = 0;
+      var tiles = tileset.tiles || tileset._tiles || [];
+      for (var i = 0; i < tiles.length && released < MAX_TILES_PER_FLUSH; i++) {
+        var t = tiles[i];
+        if (t.index && set.has(t.index.i)) {
+          t.layers = null;
+          set.delete(t.index.i);
+          released++;
+        }
+      }
+      if (released > 0 && typeof m.layer.setNeedsUpdate === "function") m.layer.setNeedsUpdate();
+      if (set.size > 0 && ctx.onDataReady) ctx.onDataReady();
+    }
+
+    // Tileset2D over the data-bearing tiles of one LOD: atomic tiles,
+    // no parent walk (A5 is not the quadtree deck.gl assumes).
+    function makeTilesetClass(lod, bboxByTile) {
       var Base = window.deck && (window.deck._Tileset2D || window.deck.Tileset2D);
       if (!Base) throw new Error("deck.Tileset2D not found");
       return class extends Base {
@@ -669,106 +788,87 @@
         }
         getTileZoom() { return lod; }
         getParentIndex() { return null; }
-        // Bypass deck.gl's parent walk. _rebuildTree calls this for every
-        // cache tile; the default impl loops `while (getTileZoom(index) >
-        // _minZoom)` and our constant getTileZoom never trips that exit.
         _getNearestAncestor() { return null; }
       };
     }
 
-    function buildTiledLayer(x, lod, byTile) {
+    function buildTiledLayer(x, lod, byTile, stroked) {
       var ver = loadVersion;
-      var bboxByTile = bboxByLod.get(lod);
       var entry = tilesetClassesByLod.get(lod);
       var TilesetClass;
       if (entry && entry.ver === ver) {
         TilesetClass = entry.cls;
       } else {
-        TilesetClass = makeLazyA5TilesetClass(lod, bboxByTile);
+        TilesetClass = makeTilesetClass(lod, bboxByLod.get(lod));
         tilesetClassesByLod.set(lod, { cls: TilesetClass, ver: ver });
       }
-
-      // Pass opacity up to TileLayer so deck.gl detects the change and
-      // nulls tile.layers, forcing renderSubLayers to re-run with the
-      // latest ctx.getOpacity(). Without this, deck.gl's prop diff sees
-      // nothing changed and skips sublayer regen, so the slider's
-      // effect never propagates.
       var layerId = "a5-lazy-tiles-lod" + lod + "-v" + ver;
       flushDirtyTiles(lod);
-      return memoLayer(layerId, styleKey(x), function () {
-      return new window.deck.TileLayer({
-        id: layerId,
-        data: EMPTY_DATA,
-        TilesetClass: TilesetClass,
-        extent: [-180, -85.05, 180, 85.05],
-        opacity: ctx.getOpacity(),
-        pickable: false,
-        beforeId: ctx.getBeforeId(),
-        getTileData: function (props) {
-          var hex = props.index ? props.index.i : null;
-          var rgs = (hex && byTile.get(hex)) || null;
-          if (!rgs || rgs.length === 0) return null;
-          for (var i = 0; i < rgs.length; i++) {
-            if (!decodedCache.has(rgs[i])) decodeRowGroup(rgs[i]);
+      return memoLayer(layerId, styleKey(x, stroked), function () {
+        return new window.deck.TileLayer({
+          id: layerId,
+          data: EMPTY_DATA,
+          TilesetClass: TilesetClass,
+          extent: [-180, -85.05, 180, 85.05],
+          opacity: ctx.getOpacity(),
+          pickable: false,
+          beforeId: ctx.getBeforeId(),
+          getTileData: function (props) {
+            var hex = props.index ? props.index.i : null;
+            var rgs = (hex && byTile.get(hex)) || null;
+            if (!rgs || rgs.length === 0) return null;
+            for (var i = 0; i < rgs.length; i++) {
+              if (!decodedCache.has(rgs[i])) decodeRowGroup(rgs[i]);
+            }
+            return rgs;
+          },
+          renderSubLayers: function (props) {
+            var rgs = props.data;
+            if (!rgs || rgs.length === 0) return null;
+            var hex = props.tile.index.i;
+            var geom = tileGeometry(lod, hex, rgs);
+            if (!geom || geom.n === 0) return null;
+            if (!withinBuildBudget()) { deferTile(lod, hex); return null; }
+            return buildGeomLayer(x, geom, "a5-lazy-lod" + lod + "-tile-" + hex, stroked, {});
           }
-          return rgs;
-        },
-        renderSubLayers: function (props) {
-          var rgs = props.data;
-          if (!rgs || rgs.length === 0) return null;
-          var hex = props.tile.index.i;
-          var entries = buildTilePolys(lod, hex, rgs);
-          if (!entries || entries.length === 0) return null;
-          var key = ver + "|" + lod + "|" + hex + "|" + entries.length;
-          return buildPolygonSubLayer(
-            x, entries, "a5-lazy-lod" + lod + "-tile-" + hex, key
-          );
-        }
-      });
+        });
       });
     }
 
-    function buildLayerAtLod(x, lod) {
+    function buildLayerAtLod(x, lod, viewport) {
+      var stroked = !!x.stroked && cellEdgePx(lod, viewport) >= TILING.MIN_STROKE_PX;
       var byTile = tilesByLod.get(lod);
-      if (byTile && byTile.size > 0) return buildTiledLayer(x, lod, byTile);
+      if (byTile && byTile.size > 0) return buildTiledLayer(x, lod, byTile, stroked);
       var flat = flatByLod.get(lod);
-      if (flat && flat.length > 0) return buildFlatLayer(x, lod, flat);
+      if (flat && flat.length > 0) return buildFlatLayer(x, lod, flat, stroked);
       return null;
     }
 
-    // Has any row group at this LOD landed in decodedCache yet? Used
-    // to decide whether the new LOD is "warm enough" to drop the
-    // previous-LOD hold layer.
     function lodHasDecodedData(lod) {
-      var flatKey = loadVersion + "|" + lod;
-      var flatCached = flatRowsCache.get(flatKey);
-      if (flatCached && flatCached.rows && flatCached.rows.length > 0) return true;
+      var flat = flatByLod.get(lod);
+      if (flat) {
+        for (var i = 0; i < flat.length; i++) if (decodedCache.has(flat[i])) return true;
+      }
       var byTile = tilesByLod.get(lod);
       if (!byTile) return false;
       var found = false;
       byTile.forEach(function (rgs) {
         if (found) return;
-        for (var i = 0; i < rgs.length; i++) {
-          if (decodedCache.has(rgs[i])) { found = true; return; }
+        for (var j = 0; j < rgs.length; j++) {
+          if (decodedCache.has(rgs[j])) { found = true; return; }
         }
       });
       return found;
     }
 
-    var lastBuiltLod = null;
-    // Last LOD that had decoded data when buildLodLayer ran. While the
-    // current LOD is still cold (or within MIN_HOLD_MS of the LOD
-    // change) we restack this LOD's layer beneath the new one so the
-    // crossover is visible rather than instantaneous.
-    var prevWarmLod = null;
-    var lodChangedAt = 0;
-    var holdTimer = null;
-    // Minimum hold (ms) read live from TILING so it can be tweaked
-    // in the browser console: A5View.tiling.MIN_HOLD_MS = 250.
     function getMinHoldMs() {
-      var v = TILING && TILING.MIN_HOLD_MS;
+      var v = TILING.MIN_HOLD_MS;
       return (typeof v === "number" && v >= 0) ? v : 200;
     }
+
+    // Layer(s) for the current viewport. While the LOD just switched to
+    // is still cold, the previous warm LOD is stacked underneath so the
+    // crossover is visible rather than a blank flash.
     function buildLodLayer(x, viewport) {
       if (!ready || !rgIndex || !window.A5) return null;
       var schedule = x.lod_resolutions || null;
@@ -778,13 +878,9 @@
       var lod = TILING.pickLod(R, schedule);
       if (lod == null) return null;
       if (lod !== lastBuiltLod) {
-        log("[a5view] buildLodLayer lod=" + lod +
-            " (R=" + R + ", zoom=" + (viewport.zoom || 0).toFixed(2) +
-            ") tiled=" + tilesByLod.has(lod) + " flat=" + flatByLod.has(lod));
+        log("[a5view] lod=" + lod + " (R=" + R + ", zoom=" + (viewport.zoom || 0).toFixed(2) + ")");
         lastBuiltLod = lod;
         lodChangedAt = nowMs();
-        // Schedule a rebuild just past the hold window so the prev
-        // layer drops cleanly even if no decode lands in the meantime.
         if (holdTimer) clearTimeout(holdTimer);
         holdTimer = setTimeout(function () {
           holdTimer = null;
@@ -792,7 +888,7 @@
         }, getMinHoldMs() + 32);
       }
 
-      var current = buildLayerAtLod(x, lod);
+      var current = buildLayerAtLod(x, lod, viewport);
       if (current == null) return null;
 
       var holdElapsed = (nowMs() - lodChangedAt) >= getMinHoldMs();
@@ -800,24 +896,37 @@
         prevWarmLod = lod;
         return current;
       }
-      // Skip the stacked hold at non-solid opacity: alpha compositing
-      // two LODs is visibly denser than the single layer the user
-      // expects, and the cell geometries don't align cleanly enough
-      // for that to look intentional.
-      if (ctx.getOpacity() < 1 - 1e-6) {
-        return current;
-      }
+      // Skip the stacked hold at non-solid opacity: two LODs composited
+      // read visibly denser than the single layer the user expects.
+      if (ctx.getOpacity() < 1 - 1e-6) return current;
       if (prevWarmLod != null && prevWarmLod !== lod) {
-        var prev = buildLayerAtLod(x, prevWarmLod);
+        var prev = buildLayerAtLod(x, prevWarmLod, viewport);
         if (prev) return [prev, current];
       }
       return current;
     }
 
-    // Decoded row for a hex cell id at a given LOD, or null.
+    // Decoded row at a LOD for a hex cell id, or null. The per-LOD hex
+    // index is filled lazily from row groups as they are first needed.
     function findRow(lod, hex) {
-      var byHex = rowsByLod.get(lod);
-      return (byHex && byHex.get(hex)) || null;
+      var byLod = rowsByLod.get(lod);
+      if (!byLod) return null;
+      while (byLod.pending.length > 0) {
+        var rg = byLod.pending.pop();
+        var g = decodedCache.get(rg);
+        if (!g) continue;
+        for (var i = 0; i < g.n; i++) {
+          byLod.index.set(TILING.bigintToHex(g.cells[i]), [rg, i]);
+        }
+      }
+      var hit = byLod.index.get(hex);
+      if (!hit) return null;
+      var geom = decodedCache.get(hit[0]);
+      if (!geom) return null;
+      var row = { pentagon: geom.cells[hit[1]] };
+      if (geom.values) row._fill_value = geom.values[hit[1]];
+      if (geom.elevation) row._elevation = geom.elevation[hit[1]];
+      return row;
     }
 
     return {
@@ -834,9 +943,10 @@
           decoded: decodedCache.size,
           pending: pendingDecodes.size,
           queued: decodeQueue.length,
-          indexedLods: Array.from(rowsByLod.keys()),
           tiledLods: tilesByLod.size,
-          flatLods: flatByLod.size
+          flatLods: flatByLod.size,
+          indexedLods: Array.from(rowsByLod.keys()),
+          worker: !!(decoder && decoder.isWorker)
         };
       }
     };

@@ -17,6 +17,8 @@
   // interactive viewer + non-selfcontained saveWidget).
   // Fallback: jsdelivr CDN bundle (selfcontained HTML where the
   // sibling file is unreachable). Same version as the vendored copy.
+  // Absolute URL the tile worker imports from (same file, own thread).
+  window.A5ViewHyparquetUrl = new URL(base + "hyparquet.esm.js", window.location.href).href;
   window.A5ViewHyparquetReady = import(base + "hyparquet.esm.js")
     .catch(function () {
       return import("https://cdn.jsdelivr.net/npm/hyparquet@1.25.6/+esm");

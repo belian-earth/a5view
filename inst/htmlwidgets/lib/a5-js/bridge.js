@@ -12,6 +12,8 @@
   var baseUrl = (here && here.src) ? here.src.replace(/[^/]+$/, "") : "";
   var local = baseUrl ? baseUrl + "a5.js" : null;
   var cdn = "https://cdn.jsdelivr.net/npm/a5-js@0.10.0/+esm";
+  // Absolute URL the tile worker imports from (same file, own thread).
+  window.A5ViewA5Url = local ? new URL(local, window.location.href).href : cdn;
   window.A5Ready = new Promise(function (resolve, reject) {
     var s = document.createElement("script");
     s.type = "module";
