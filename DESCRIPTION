@@ -21,7 +21,7 @@ Roxygen: list(markdown = TRUE)
 Depends:
     R (>= 3.5)
 Imports:
-    a5R (>= 0.9.9.9000),
+    a5R (>= 0.9.9.9001),
     arrow,
     base64enc,
     cli,
