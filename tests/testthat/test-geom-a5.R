@@ -1,5 +1,3 @@
-skip_if_not_installed("sf")
-
 sample_df <- function() {
   cells <- a5R::a5_uncompact(
     a5R::a5_polygon_to_cells(wk::rct(33.3, -13, 33.4, -12.9), resolution = 12L)

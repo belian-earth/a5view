@@ -53,7 +53,6 @@ geom_a5 <- function(mapping = NULL, data = NULL, ...,
                     render = c("auto", "vector", "raster"),
                     raster_dpi = 300,
                     na.rm = FALSE, show.legend = NA, inherit.aes = TRUE) {
-  rlang::check_installed("sf", reason = "to use `geom_a5()`.")
   render <- rlang::arg_match(render)
   check_number_decimal(raster_dpi, min = 1, arg = "raster_dpi")
   # Groups mean nothing for cells, but ggplot2 builds them from every

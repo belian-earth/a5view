@@ -28,10 +28,8 @@
   with `geom_sf()` layers in any projection, sharing scales, limits and
   graticules. Like `geom_sf()`, it brings a default `coord_sf()` (crs
   from the plot's sf layers, else EPSG:4326), so maps keep a fixed
-  geographic aspect ratio unless another coord is added. ggplot2 is
-  imported. sf, which the default `coord_sf()` needs, is suggested, so
-  using only the interactive maps avoids its GDAL, GEOS and PROJ
-  system libraries.
+  geographic aspect ratio unless another coord is added. ggplot2 and sf
+  are imported.
 * `geom_a5()` is built for large cell sets. One row per cell goes through
   ggplot2, and outlines are only generated at draw time. With
   `render = "auto"` (the default) cells smaller than about three device

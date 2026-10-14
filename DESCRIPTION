@@ -31,13 +31,13 @@ Imports:
     grid,
     htmlwidgets,
     rlang (>= 1.0.0),
+    sf (>= 1.0.0),
     vctrs,
     yyjsonr
 Suggests:
     irlba,
     png,
     ragg,
-    sf,
     shiny,
     testthat (>= 3.0.0),
     withr,
