@@ -70,3 +70,6 @@
 * New tests check the vendored a5-js against a5R: `cellToBoundary()` and
   `lonLatToCell()` agree with `a5_cell_to_boundary()` and
   `a5_lonlat_to_cell()` at resolutions 0 to 18.
+* `geom_a5()` takes cell outlines from `a5R::a5_cell_to_boundary_xy()`,
+  which returns every cell's vertices as flat vectors without building a
+  geometry per cell.

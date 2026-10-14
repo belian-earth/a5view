@@ -253,18 +253,8 @@ unproject_to_lonlat <- function(xy, crs) {
 # where `cell` indexes the input. Missing cells give no ring; a cell
 # crossing the antimeridian gives two (see split_antimeridian()).
 a5_rings <- function(cells) {
-  # Looked up at run time: a5R gained a5_cell_to_boundary_xy() after
-  # 0.9.9.9000, which is all a5view requires for now.
-  boundary_xy <- get0("a5_cell_to_boundary_xy", envir = asNamespace("a5R"), inherits = FALSE)
-  if (!is.null(boundary_xy)) {
-    xy <- boundary_xy(cells, closed = FALSE)
-    lengths <- xy$lengths
-  } else {
-    # a5R before a5_cell_to_boundary_xy(): same vertices, via WKB.
-    xy <- wk::wk_coords(a5R::a5_cell_to_boundary(cells, closed = FALSE))
-    lengths <- tabulate(xy$feature_id, nbins = length(cells))
-  }
-  rings <- list(x = xy$x, y = xy$y, lengths = lengths, cell = seq_along(cells))
+  xy <- a5R::a5_cell_to_boundary_xy(cells, closed = FALSE)
+  rings <- list(x = xy$x, y = xy$y, lengths = xy$lengths, cell = seq_along(cells))
   drop <- rings$lengths == 0L
   rings$lengths <- rings$lengths[!drop]
   rings$cell <- rings$cell[!drop]
