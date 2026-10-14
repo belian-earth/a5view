@@ -79,37 +79,38 @@ any `coord_sf()` projection. Large cell sets are drawn as a raster at
 the output resolution, so a plot of millions of cells costs about the
 same as one of thousands.
 
-The package ships `aef_malawi`, 23,691 resolution-15 cells of the
-[AlphaEarth Foundations](https://source.coop/tge-labs/aef) satellite
-embedding over central Malawi. Mapping three embedding axes through
-`cells_rgb()` gives a false-colour composite; its output is already
-colour, so no scale is needed.
+The package ships `s2_santiago`, 15,626 resolution-18 cells (about 22 m
+across) of a [cloud-free Sentinel-2
+mosaic](https://source.coop/earthgenome/sentinel2-temporal-mosaics) over
+Parque O’Higgins in Santiago, Chile. Mapping the red, green and blue
+bands through `cells_rgb()` gives a true-colour composite; its output is
+already colour, so no scale is needed.
 
 ``` r
 library(ggplot2)
 
-ggplot(aef_malawi, aes(cell = cell, fill = cells_rgb(A10, A11, A12))) +
+ggplot(s2_santiago, aes(cell = cell, fill = cells_rgb(B04, B03, B02, range = c(300, 2800)))) +
   geom_a5() +
-  labs(title = "AEF embedding axes A10-A12 as RGB")
+  labs(title = "Sentinel-2 true colour, Santiago 2023")
 ```
 
 <img src="man/figures/README-ggplot-rgb-1.png" alt="" width="100%" />
 
-Any fill scale works, and `coord_sf()` reprojects the cells, here to UTM
-zone 36S:
+Any fill scale works, and `coord_sf()` reprojects the cells, here NDVI
+in UTM zone 19S:
 
 ``` r
-ggplot(aef_malawi, aes(cell = cell, fill = A10)) +
+ggplot(s2_santiago, aes(cell = cell, fill = (B08 - B04) / (B08 + B04))) +
   geom_a5() +
-  scale_fill_viridis_c(option = "magma") +
-  coord_sf(crs = 32736) +
+  scale_fill_distiller(palette = "Greens", direction = 1, name = "NDVI") +
+  coord_sf(crs = 32719) +
   theme_minimal()
 ```
 
 <img src="man/figures/README-ggplot-utm-1.png" alt="" width="100%" />
 
-The AlphaEarth Foundations Satellite Embedding dataset is produced by
-Google and Google DeepMind (CC-BY 4.0).
+Sentinel-2 mosaic by Earth Genome (CC-BY 4.0). Contains modified
+Copernicus Sentinel data 2023.
 
 ## Polygon draw mode (Shiny only)
 

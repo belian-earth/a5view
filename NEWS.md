@@ -42,11 +42,12 @@
   it draws as colours with no scale or legend. `a5_view()` treats it as
   before.
 
-* New dataset `aef_malawi`: 23,691 resolution-15 cells of the
-  AlphaEarth Foundations satellite embedding over central Malawi (three
-  embedding axes, CC-BY 4.0), for examples of colour mapping and
-  false-colour composites. `data-raw/aef_malawi.R` rebuilds it.
-* The README's ggplot2 examples now render, using `aef_malawi`.
+* New dataset `s2_santiago`: 15,626 resolution-18 cells of a
+  cloud-free 2023 Sentinel-2 mosaic over central Santiago, Chile (blue,
+  green, red and near-infrared bands, CC-BY 4.0), for examples of
+  true-colour composites and colour mapping. `data-raw/s2_santiago.R`
+  rebuilds it.
+* The README's ggplot2 examples now render, using `s2_santiago`.
 
 ## Internals
 
