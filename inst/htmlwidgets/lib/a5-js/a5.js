@@ -1842,7 +1842,7 @@ function compatSToTriple(s, resolution, orientation = "uv") {
 }
 
 // modules/core/serialization.ts
-var FIRST_HILBERT_RESOLUTION = 2;
+var FIRST_CURVE_RESOLUTION = 2;
 var MAX_RESOLUTION = 30;
 var QUINTANT_SHIFT = 58n;
 var S_MASK = (1n << QUINTANT_SHIFT) - 1n;
@@ -1870,7 +1870,7 @@ for (let r = 0; r <= MAX_RESOLUTION; r++) {
   SLOT_COUNTS.push(r === 0 ? ORIGIN_SLOTS : r === 1 ? QUINTANT_SLOTS : 1n << BigInt(60 - 2 * r));
 }
 var RES30_TAG_BITS = 0b10101n;
-var HILBERT_TAG_BITS = RESOLUTION_TAGS.slice(FIRST_HILBERT_RESOLUTION, MAX_RESOLUTION).reduce(
+var CURVE_TAG_BITS = RESOLUTION_TAGS.slice(FIRST_CURVE_RESOLUTION, MAX_RESOLUTION).reduce(
   (bits, tag) => bits | tag,
   0n
 );
@@ -1878,7 +1878,7 @@ function cellFirstSlot(cell) {
   const tag = cell & -cell;
   if (tag < RESOLUTION_TAGS[1]) {
     if ((tag & RES30_TAG_BITS) !== 0n) return res30ToSlot(cell);
-    if ((tag & HILBERT_TAG_BITS) !== 0n && cell < WORLD_SLOTS) return cell - tag;
+    if ((tag & CURVE_TAG_BITS) !== 0n && cell < WORLD_SLOTS) return cell - tag;
     if (tag === 0n) return 0n;
   } else {
     const top = cell >> QUINTANT_SHIFT;
@@ -1956,7 +1956,7 @@ function deserialize(index) {
   const origin = origins[Math.floor(quintant / 5)];
   if (resolution === 0) return { origin, segment: 0, S: 0n, resolution };
   const segment = (quintant + origin.firstQuintant) % 5;
-  const S = resolution < FIRST_HILBERT_RESOLUTION ? 0n : (slot & S_MASK) / SLOT_COUNTS[resolution];
+  const S = resolution < FIRST_CURVE_RESOLUTION ? 0n : (slot & S_MASK) / SLOT_COUNTS[resolution];
   return { origin, segment, S, resolution };
 }
 function serialize(cell) {
@@ -1966,7 +1966,7 @@ function serialize(cell) {
   }
   if (resolution === -1) return WORLD_CELL;
   if (resolution === 0) return slotToCell(BigInt(5 * origin.id) * QUINTANT_SLOTS, 0);
-  const offset = resolution >= FIRST_HILBERT_RESOLUTION ? BigInt(S) * SLOT_COUNTS[resolution] : 0n;
+  const offset = resolution >= FIRST_CURVE_RESOLUTION ? BigInt(S) * SLOT_COUNTS[resolution] : 0n;
   if (offset >= QUINTANT_SLOTS) {
     throw new Error(`S (${S}) is too large for resolution level ${resolution}`);
   }
@@ -1996,7 +1996,7 @@ function cellToChildren(index, childResolution) {
     newOrigins = origins;
   }
   const allSegments = currentResolution === -1 && newResolution > 0 || currentResolution === 0;
-  const resolutionDiff = newResolution - Math.max(currentResolution, FIRST_HILBERT_RESOLUTION - 1);
+  const resolutionDiff = newResolution - Math.max(currentResolution, FIRST_CURVE_RESOLUTION - 1);
   const childrenCount = Math.pow(4, resolutionDiff);
   const children = [];
   const shiftedS = S << BigInt(2 * resolutionDiff);
@@ -2032,7 +2032,7 @@ function cellToParent(index, parentResolution) {
     c2 = normalizeRes30(index);
     if (parentResolution === MAX_RESOLUTION - 1) return c2;
   }
-  if (parentResolution >= FIRST_HILBERT_RESOLUTION) {
+  if (parentResolution >= FIRST_CURVE_RESOLUTION) {
     const keepShift = BigInt(60 - 2 * parentResolution);
     return c2 >> keepShift << keepShift | 1n << BigInt(59 - 2 * parentResolution);
   }
@@ -2153,12 +2153,12 @@ function _lookupInQuintant(dodecPoint, origin, quintant, resolution) {
     fromRotation(rotation, -2 * PI_OVER_5 * quintant);
     transformMat2(_scaledPoint, _scaledPoint, rotation);
   }
-  const hilbertResolution = 1 + resolution - FIRST_HILBERT_RESOLUTION;
-  const scale4 = 2 ** hilbertResolution;
+  const curveLevel = 1 + resolution - FIRST_CURVE_RESOLUTION;
+  const scale4 = 2 ** curveLevel;
   const px = _scaledPoint[0] * scale4;
   const py = _scaledPoint[1] * scale4;
   const ij = FaceToIJ([px, py]);
-  const base = roundToTriple(ij, hilbertResolution);
+  const base = roundToTriple(ij, curveLevel);
   let triple = base;
   const maxRow = scale4 - 1;
   let flavor = tripleFlavor(base, maxRow);
@@ -2179,15 +2179,15 @@ function _lookupInQuintant(dodecPoint, origin, quintant, resolution) {
       }
     }
   }
-  const S = tripleToS(triple, hilbertResolution, orientation);
+  const S = tripleToS(triple, curveLevel, orientation);
   if (S === null) return null;
   const cellId = serialize({ S, segment, origin, resolution });
-  return { margin, cellId, triple, flavor, quintant, hilbertResolution, originId: origin.id, resolution };
+  return { margin, cellId, triple, flavor, quintant, curveLevel, originId: origin.id, resolution };
 }
 function _acceptCandidate(c2) {
   _lastResult = {
     cellId: c2.cellId,
-    pentagon: getPentagonVertices(c2.hilbertResolution, c2.quintant, c2.triple, c2.flavor),
+    pentagon: getPentagonVertices(c2.curveLevel, c2.quintant, c2.triple, c2.flavor),
     originId: c2.originId,
     resolution: c2.resolution
   };
@@ -2210,7 +2210,7 @@ function _sphericalToCellBoundary(spherical, resolution, firstOrigin, firstQuint
   }
   let best = -Infinity;
   for (const c2 of candidates) if (c2.margin > best) best = c2.margin;
-  const eps = TIE_EPS * 2 ** (1 + resolution - FIRST_HILBERT_RESOLUTION);
+  const eps = TIE_EPS * 2 ** (1 + resolution - FIRST_CURVE_RESOLUTION);
   let winner = null;
   for (const c2 of candidates) {
     if (c2.margin >= best - eps && (winner === null || c2.cellId < winner.cellId)) winner = c2;
@@ -2220,32 +2220,32 @@ function _sphericalToCellBoundary(spherical, resolution, firstOrigin, firstQuint
 }
 function cellCenterToCell(cell, resolution) {
   const a5cell = deserialize(cell);
-  if (resolution >= FIRST_HILBERT_RESOLUTION - 1 && a5cell.resolution >= FIRST_HILBERT_RESOLUTION - 1) {
+  if (resolution >= FIRST_CURVE_RESOLUTION - 1 && a5cell.resolution >= FIRST_CURVE_RESOLUTION - 1) {
     const { quintant, orientation } = segmentToQuintant(a5cell.segment, a5cell.origin);
-    const hilbertResolution = a5cell.resolution - FIRST_HILBERT_RESOLUTION + 1;
-    const { triple, flavor } = sToCell(a5cell.S, hilbertResolution, orientation);
-    const center2 = getPentagonCenter(hilbertResolution, quintant, triple, flavor);
+    const curveLevel = a5cell.resolution - FIRST_CURVE_RESOLUTION + 1;
+    const { triple, flavor } = sToCell(a5cell.S, curveLevel, orientation);
+    const center2 = getPentagonCenter(curveLevel, quintant, triple, flavor);
     const best = _lookupInQuintant(center2, a5cell.origin, getQuintantPolar(toPolar(center2)), resolution);
-    if (best !== null && best.margin > TIE_EPS * 2 ** best.hilbertResolution) return best.cellId;
+    if (best !== null && best.margin > TIE_EPS * 2 ** best.curveLevel) return best.cellId;
   }
   return sphericalToCell(cellToSpherical(cell), resolution);
 }
 function _getPentagon({ S, segment, origin, resolution }) {
   const { quintant, orientation } = segmentToQuintant(segment, origin);
-  if (resolution === FIRST_HILBERT_RESOLUTION - 2) {
+  if (resolution === FIRST_CURVE_RESOLUTION - 2) {
     return getFaceVertices();
   }
-  const hilbertResolution = resolution - FIRST_HILBERT_RESOLUTION + 1;
-  const { triple, flavor } = sToCell(S, hilbertResolution, orientation);
-  return getPentagonVertices(hilbertResolution, quintant, triple, flavor);
+  const curveLevel = resolution - FIRST_CURVE_RESOLUTION + 1;
+  const { triple, flavor } = sToCell(S, curveLevel, orientation);
+  return getPentagonVertices(curveLevel, quintant, triple, flavor);
 }
 function cellToSpherical(cell) {
   const { S, segment, origin, resolution } = deserialize(cell);
-  if (resolution >= FIRST_HILBERT_RESOLUTION - 1) {
+  if (resolution >= FIRST_CURVE_RESOLUTION - 1) {
     const { quintant, orientation } = segmentToQuintant(segment, origin);
-    const hilbertResolution = resolution - FIRST_HILBERT_RESOLUTION + 1;
-    const { triple, flavor } = sToCell(S, hilbertResolution, orientation);
-    const center2 = getPentagonCenter(hilbertResolution, quintant, triple, flavor);
+    const curveLevel = resolution - FIRST_CURVE_RESOLUTION + 1;
+    const { triple, flavor } = sToCell(S, curveLevel, orientation);
+    const center2 = getPentagonCenter(curveLevel, quintant, triple, flavor);
     return dodecahedron.inverse(center2, origin.id);
   }
   const pentagon = _getPentagon({ S, segment, origin, resolution });
@@ -2314,12 +2314,12 @@ function getNumChildren(parentResolution, childResolution) {
     const child = BigInt(childResolution);
     if (child < parent) return 0n;
     if (child === parent) return 1n;
-    if (parent >= BigInt(FIRST_HILBERT_RESOLUTION)) return 4n ** (child - parent);
+    if (parent >= BigInt(FIRST_CURVE_RESOLUTION)) return 4n ** (child - parent);
     return getNumCells(child) / (parent < 0n ? 1n : getNumCells(parent));
   }
   if (childResolution < parentResolution) return 0;
   if (childResolution === parentResolution) return 1;
-  if (parentResolution >= FIRST_HILBERT_RESOLUTION) {
+  if (parentResolution >= FIRST_CURVE_RESOLUTION) {
     return 4 ** (childResolution - parentResolution);
   }
   const parentCount = getNumCells(parentResolution) || 1;
@@ -2613,24 +2613,24 @@ function fillQuintantTables() {
     }
   }
 }
-function tripleCellToId(originId2, quintant, x, y, z, hilbertRes, resolution) {
+function tripleCellToId(originId2, quintant, x, y, z, curveLevel, resolution) {
   if (QUINTANT_SEGMENT.length === 0) fillQuintantTables();
   const q = originId2 * 5 + quintant;
-  const s = tripleToS({ x, y, z }, hilbertRes, QUINTANT_ORIENTATION[q]);
+  const s = tripleToS({ x, y, z }, curveLevel, QUINTANT_ORIENTATION[q]);
   return serialize({ origin: origins[originId2], segment: QUINTANT_SEGMENT[q], S: s, resolution });
 }
 function cellIdsToTriples(cellIds, out = []) {
   for (const cellId of cellIds) {
     const { origin, segment, S, resolution } = deserialize(cellId);
     const { quintant, orientation } = segmentToQuintant(segment, origin);
-    const t = sToTriple(S, resolution - FIRST_HILBERT_RESOLUTION + 1, orientation);
+    const t = sToTriple(S, resolution - FIRST_CURVE_RESOLUTION + 1, orientation);
     out.push(origin.id, quintant, t.x, t.y, t.z);
   }
   return out;
 }
-function tripleCellCenter(originId2, quintant, x, y, z, hilbertRes, maxRow) {
+function tripleCellCenter(originId2, quintant, x, y, z, curveLevel, maxRow) {
   const triple = { x, y, z };
-  const face = getPentagonCenter(hilbertRes, quintant, triple, tripleFlavor(triple, maxRow));
+  const face = getPentagonCenter(curveLevel, quintant, triple, tripleFlavor(triple, maxRow));
   return dodecahedron2.inverse(face, originId2);
 }
 var boundary = [];
@@ -2708,7 +2708,7 @@ function descendInCurveOrder(starts, startLevel, resolution, classify2, runs) {
   const order = new Array(count2);
   for (let i = 0; i < count2; i++) order[i] = i;
   order.sort((a2, b2) => slots[a2] < slots[b2] ? -1 : slots[a2] > slots[b2] ? 1 : 0);
-  const targetLevel = resolution - FIRST_HILBERT_RESOLUTION + 1;
+  const targetLevel = resolution - FIRST_CURVE_RESOLUTION + 1;
   const d2 = {
     classify: classify2,
     targetLevel,
@@ -2745,7 +2745,7 @@ function descendInCurveOrder(starts, startLevel, resolution, classify2, runs) {
   }
 }
 function descend(d2, level, flavor, slot) {
-  const resolution = level + FIRST_HILBERT_RESOLUTION - 1;
+  const resolution = level + FIRST_CURVE_RESOLUTION - 1;
   getPentagonCenter(level, d2.quintant, d2.triples[level], flavor, d2.center);
   const kind = d2.classify(d2.originId, resolution, d2.center, slot);
   if (kind === INSIDE) {
@@ -2829,7 +2829,7 @@ function cellToSubcell(cell, resolution) {
   }
   const target = resolution;
   const reaches = new Float64Array(target + 1);
-  for (let res = 1; res < target; res++) reaches[res] = DESCENDANT_REACH / 2 ** (res - FIRST_HILBERT_RESOLUTION + 1);
+  for (let res = 1; res < target; res++) reaches[res] = DESCENDANT_REACH / 2 ** (res - FIRST_CURVE_RESOLUTION + 1);
   const classify2 = (id, res, center2, slot) => {
     const margin = signedMargin(linesByOrigin[id], center2[0], center2[1]);
     const reach = reaches[res] + EDGE_EPS;
@@ -3070,18 +3070,18 @@ var V0_LAYOUTS = [
 ];
 function migrate(cell) {
   const { origin, segment, S, resolution } = deserialize(cell);
-  if (resolution < FIRST_HILBERT_RESOLUTION - 1) return cell;
+  if (resolution < FIRST_CURVE_RESOLUTION - 1) return cell;
   const v0 = V0_LAYOUTS[origin.id];
   const step = faceStep(origin);
   const faceRelativeQuintant = (segment - origin.firstQuintant + 5) % 5;
   const quintant = (v0.firstQuintant + step * faceRelativeQuintant + 5) % 5;
   const target = quintantToSegment(quintant, origin);
-  if (resolution === FIRST_HILBERT_RESOLUTION - 1) {
+  if (resolution === FIRST_CURVE_RESOLUTION - 1) {
     return serialize({ origin, segment: target.segment, S: 0n, resolution });
   }
-  const hilbertResolution = 1 + resolution - FIRST_HILBERT_RESOLUTION;
-  const triple = compatSToTriple(S, hilbertResolution, v0.orientation[faceRelativeQuintant]);
-  const newS = tripleToS(triple, hilbertResolution, target.orientation);
+  const curveLevel = 1 + resolution - FIRST_CURVE_RESOLUTION;
+  const triple = compatSToTriple(S, curveLevel, v0.orientation[faceRelativeQuintant]);
+  const newS = tripleToS(triple, curveLevel, target.orientation);
   return serialize({ origin, segment: target.segment, S: newS, resolution });
 }
 
@@ -3092,9 +3092,9 @@ function addCell(next, prev, current, originId2, quintant, x, y, z) {
   next.keys.add(key);
   next.cells.push(originId2, quintant, x, y, z);
 }
-function pushCellIds(out, cells, hilbertRes, resolution) {
+function pushCellIds(out, cells, curveLevel, resolution) {
   for (let c2 = 0; c2 < cells.length; c2 += 5) {
-    out.push(tripleCellToId(cells[c2], cells[c2 + 1], cells[c2 + 2], cells[c2 + 3], cells[c2 + 4], hilbertRes, resolution));
+    out.push(tripleCellToId(cells[c2], cells[c2 + 1], cells[c2 + 2], cells[c2 + 3], cells[c2 + 4], curveLevel, resolution));
   }
 }
 function _gridDisk(cellId, k, edgeOnly) {
@@ -3107,8 +3107,8 @@ function _gridDisk(cellId, k, edgeOnly) {
       0
     );
   }
-  const hilbertRes = resolution - FIRST_HILBERT_RESOLUTION + 1;
-  const maxRow = (1 << hilbertRes) - 1;
+  const curveLevel = resolution - FIRST_CURVE_RESOLUTION + 1;
+  const maxRow = (1 << curveLevel) - 1;
   const [originId2, quintant, x, y, z] = cellIdsToTriples([cellId]);
   let interior = [cellId];
   let prevFrontier = { keys: /* @__PURE__ */ new Set(), cells: [] };
@@ -3122,15 +3122,15 @@ function _gridDisk(cellId, k, edgeOnly) {
       forEachTripleNeighbor(cells[c2], cells[c2 + 1], cells[c2 + 2], cells[c2 + 3], cells[c2 + 4], maxRow, edgeOnly, visit);
     }
     if (ring === 1) frontier.cells.length = 0;
-    pushCellIds(interior, prevFrontier.cells, hilbertRes, resolution);
+    pushCellIds(interior, prevFrontier.cells, curveLevel, resolution);
     if (interior.length > 100) {
       interior = compactCells(interior);
     }
     prevFrontier = frontier;
     frontier = nextFrontier;
   }
-  pushCellIds(interior, prevFrontier.cells, hilbertRes, resolution);
-  pushCellIds(interior, frontier.cells, hilbertRes, resolution);
+  pushCellIds(interior, prevFrontier.cells, curveLevel, resolution);
+  pushCellIds(interior, frontier.cells, curveLevel, resolution);
   return toCovering(interior, resolution);
 }
 function gridDisk(cellId, k) {
@@ -3160,7 +3160,7 @@ function estimateCellRadius(resolution) {
 function pickCoarseResolution(radius, targetRes) {
   const halfAngleSin = Math.sin(radius / (2 * AUTHALIC_RADIUS_EARTH));
   const capAreaM2 = 4 * Math.PI * AUTHALIC_RADIUS_EARTH * AUTHALIC_RADIUS_EARTH * halfAngleSin * halfAngleSin;
-  for (let res = FIRST_HILBERT_RESOLUTION; res <= targetRes; res++) {
+  for (let res = FIRST_CURVE_RESOLUTION; res <= targetRes; res++) {
     const cArea = cellArea(res);
     if (capAreaM2 / cArea >= MIN_CELLS_FOR_SUBDIVISION) {
       return res;
@@ -3169,11 +3169,11 @@ function pickCoarseResolution(radius, targetRes) {
   return targetRes;
 }
 function coarseCapCells(startCell, center2, hExpanded) {
-  const hilbertRes = getResolution(startCell) - FIRST_HILBERT_RESOLUTION + 1;
-  const maxRow = (1 << hilbertRes) - 1;
+  const curveLevel = getResolution(startCell) - FIRST_CURVE_RESOLUTION + 1;
+  const maxRow = (1 << curveLevel) - 1;
   const cells = cellIdsToTriples([startCell]);
   walkTripleCells(cells.slice(), maxRow, (originId2, q, x, y, z) => {
-    const within = haversine(center2, tripleCellCenter(originId2, q, x, y, z, hilbertRes, maxRow)) <= hExpanded;
+    const within = haversine(center2, tripleCellCenter(originId2, q, x, y, z, curveLevel, maxRow)) <= hExpanded;
     if (within) cells.push(originId2, q, x, y, z);
     return within;
   });
@@ -3206,7 +3206,7 @@ function sphericalCap(cellId, radius) {
   const runs = [];
   descendInCurveOrder(
     coarseCapCells(startCell, center2, hExpanded),
-    coarseRes - FIRST_HILBERT_RESOLUTION + 1,
+    coarseRes - FIRST_CURVE_RESOLUTION + 1,
     targetRes,
     (originId2, res, face) => {
       const h = haversine(center2, dodecahedron3.inverse(face, originId2));
@@ -3251,8 +3251,8 @@ var faceA = new Array(origins.length);
 var faceB = new Array(origins.length);
 function tracePath(points, closed, resolution, visit, exact = true) {
   const sampleInterval = estimateCellRadius(resolution) * 0.5;
-  const hilbertRes = resolution - FIRST_HILBERT_RESOLUTION + 1;
-  const maxRow = (1 << hilbertRes) - 1;
+  const curveLevel = resolution - FIRST_CURVE_RESOLUTION + 1;
+  const maxRow = (1 << curveLevel) - 1;
   const n = points.length;
   const pointSpherical = new Array(n);
   const pointVecs = new Array(n);
@@ -3280,7 +3280,7 @@ function tracePath(points, closed, resolution, visit, exact = true) {
       faceB[originId2] = faceOfB !== null && shapeB !== null && originId2 === shapeB.originId ? faceOfB : dodecahedron4.forward(b2, originId2);
     }
   };
-  const pentagonOf = (quintant, triple) => getPentagonVertices(hilbertRes, quintant, triple, tripleFlavor(triple, maxRow));
+  const pentagonOf = (quintant, triple) => getPentagonVertices(curveLevel, quintant, triple, tripleFlavor(triple, maxRow));
   const touches = (originId2, quintant, triple) => {
     project(originId2);
     return pentagonOf(quintant, triple).intersectsSegment(faceA[originId2], faceB[originId2]);
@@ -3319,7 +3319,7 @@ function tracePath(points, closed, resolution, visit, exact = true) {
   const searchSubsegment = (cellA, cellB, arc) => {
     walkTripleCells(cellIdsToTriples([cellA, cellB]), maxRow, (originId2, quintant, x, y, z) => {
       if (!touches(originId2, quintant, { x, y, z })) return false;
-      visit(tripleCellToId(originId2, quintant, x, y, z, hilbertRes, resolution), arc);
+      visit(tripleCellToId(originId2, quintant, x, y, z, curveLevel, resolution), arc);
       return true;
     });
   };
@@ -3643,20 +3643,20 @@ function polygonArea(ringVecsList) {
 }
 
 // modules/regions/curve-runs.ts
-function tripleSlot(originId2, quintant, x, y, z, hilbertRes, unitShift) {
+function tripleSlot(originId2, quintant, x, y, z, curveLevel, unitShift) {
   const i = originId2 * 5 + quintant;
-  return QUINTANT_PREFIX[i] | tripleToS({ x, y, z }, hilbertRes, QUINTANT_ORIENTATION[i]) << unitShift;
+  return QUINTANT_PREFIX[i] | tripleToS({ x, y, z }, curveLevel, QUINTANT_ORIENTATION[i]) << unitShift;
 }
 function fillByCurveRuns(boundary2, triples, resolution, overlapping, capHoldsQuintant) {
-  const hilbertRes = resolution - FIRST_HILBERT_RESOLUTION + 1;
-  const maxRow = (1 << hilbertRes) - 1;
+  const curveLevel = resolution - FIRST_CURVE_RESOLUTION + 1;
+  const maxRow = (1 << curveLevel) - 1;
   const { cells: ringCells, parents } = boundaryNeighbors(triples, [
     (b2, c2, visit) => forEachTripleNeighbor(b2[c2], b2[c2 + 1], b2[c2 + 2], b2[c2 + 3], b2[c2 + 4], maxRow, true, visit),
     (b2, c2, visit) => forEachTripleNeighbor(b2[c2], b2[c2 + 1], b2[c2 + 2], b2[c2 + 3], b2[c2 + 4], maxRow, false, visit)
   ]);
   fillQuintantTables();
   const unit = SLOT_COUNTS[resolution];
-  const unitShift = BigInt(58 - 2 * hilbertRes);
+  const unitShift = BigInt(58 - 2 * curveLevel);
   const EMIT = 1;
   const RING = 2;
   const packed = unitShift >= 2n;
@@ -3678,11 +3678,11 @@ function fillByCurveRuns(boundary2, triples, resolution, overlapping, capHoldsQu
   const ringInside = new Uint8Array(ringCells.length / 5);
   for (let c2 = 0, i2 = nBoundary; c2 < ringCells.length; c2 += 5, i2++) {
     const r = ringCells;
-    const center2 = toCartesian(tripleCellCenter(r[c2], r[c2 + 1], r[c2 + 2], r[c2 + 3], r[c2 + 4], hilbertRes, maxRow));
+    const center2 = toCartesian(tripleCellCenter(r[c2], r[c2 + 1], r[c2 + 2], r[c2 + 3], r[c2 + 4], curveLevel, maxRow));
     const inside = insideNextTo(boundary2, center2, parents[c2 / 5]);
     if (inside) ringInside[c2 / 5] = 1;
     const slot = withFlags(
-      tripleSlot(r[c2], r[c2 + 1], r[c2 + 2], r[c2 + 3], r[c2 + 4], hilbertRes, unitShift),
+      tripleSlot(r[c2], r[c2 + 1], r[c2 + 2], r[c2 + 3], r[c2 + 4], curveLevel, unitShift),
       inside ? EMIT | RING : RING
     );
     slots[i2] = slot;
@@ -3693,7 +3693,7 @@ function fillByCurveRuns(boundary2, triples, resolution, overlapping, capHoldsQu
     if ((flagsOf(ringSlot) & RING) === 0) return void 0;
     const c2 = ringBySlot.get(ringSlot);
     const q = Number(slot >> QUINTANT_SHIFT);
-    const t = sToTriple((slot & S_MASK) >> unitShift, hilbertRes, QUINTANT_ORIENTATION[TRIPLE_QUINTANT_BY_ID_ORDER[q]]);
+    const t = sToTriple((slot & S_MASK) >> unitShift, curveLevel, QUINTANT_ORIENTATION[TRIPLE_QUINTANT_BY_ID_ORDER[q]]);
     const r = ringCells;
     const dx = t.x - r[c2 + 2];
     const dy = t.y - r[c2 + 3];
@@ -3742,8 +3742,8 @@ function fillByCurveRuns(boundary2, triples, resolution, overlapping, capHoldsQu
 
 // modules/traversal/lattice-flood-fill.ts
 function tripleSpaceFloodFill(firewall, seeds, resolution, maxLayers) {
-  const hilbertRes = resolution - FIRST_HILBERT_RESOLUTION + 1;
-  const maxRow = (1 << hilbertRes) - 1;
+  const curveLevel = resolution - FIRST_CURVE_RESOLUTION + 1;
+  const maxRow = (1 << curveLevel) - 1;
   const state = Array.isArray(firewall) ? { visited: /* @__PURE__ */ new Set() } : firewall.state;
   const { visited } = state;
   const blocked = Array.isArray(firewall) ? firewall : firewall.delta;
@@ -3782,7 +3782,7 @@ function tripleSpaceFloodFill(firewall, seeds, resolution, maxLayers) {
     const ids = [];
     for (let c2 = 0; c2 < cells.length; c2 += 5) {
       ids.push(
-        tripleCellToId(cells[c2], cells[c2 + 1], cells[c2 + 2], cells[c2 + 3], cells[c2 + 4], hilbertRes, resolution)
+        tripleCellToId(cells[c2], cells[c2 + 1], cells[c2 + 2], cells[c2 + 3], cells[c2 + 4], curveLevel, resolution)
       );
     }
     return ids;
@@ -3796,8 +3796,8 @@ function prefersFlood(ringVecsList, boundaryCount, resolution, capHoldsQuintant)
   return !capHoldsQuintant && polygonArea(ringVecsList) / (4 * Math.PI) * getNumCells(resolution) < FLOOD_INTERIOR_PER_BOUNDARY * boundaryCount;
 }
 function fillByFlood(boundary2, triples, resolution, overlapping) {
-  const hilbertRes = resolution - FIRST_HILBERT_RESOLUTION + 1;
-  const maxRow = (1 << hilbertRes) - 1;
+  const curveLevel = resolution - FIRST_CURVE_RESOLUTION + 1;
+  const maxRow = (1 << curveLevel) - 1;
   const out = boundaryOutput(boundary2, overlapping);
   const { cells: shell, parents } = boundaryNeighbors(triples, [
     (b2, c2, visit) => forEachLatticeNeighbor(b2[c2], b2[c2 + 1], b2[c2 + 2], b2[c2 + 3], b2[c2 + 4], maxRow, visit)
@@ -3806,14 +3806,14 @@ function fillByFlood(boundary2, triples, resolution, overlapping) {
   const firewall = triples.slice();
   for (let c2 = 0; c2 < shell.length; c2 += 5) {
     const s = shell;
-    const center2 = toCartesian(tripleCellCenter(s[c2], s[c2 + 1], s[c2 + 2], s[c2 + 3], s[c2 + 4], hilbertRes, maxRow));
+    const center2 = toCartesian(tripleCellCenter(s[c2], s[c2 + 1], s[c2 + 2], s[c2 + 3], s[c2 + 4], curveLevel, maxRow));
     const side = insideNextTo(boundary2, center2, parents[c2 / 5]) ? seeds : firewall;
     for (let k = 0; k < 5; k++) side.push(s[c2 + k]);
   }
   if (seeds.length > 0) {
     for (let c2 = 0; c2 < seeds.length; c2 += 5) {
       out.push(
-        tripleCellToId(seeds[c2], seeds[c2 + 1], seeds[c2 + 2], seeds[c2 + 3], seeds[c2 + 4], hilbertRes, resolution)
+        tripleCellToId(seeds[c2], seeds[c2 + 1], seeds[c2 + 2], seeds[c2 + 3], seeds[c2 + 4], curveLevel, resolution)
       );
     }
     const { interiorCells } = tripleSpaceFloodFill(firewall, seeds, resolution);
@@ -3854,7 +3854,7 @@ function polygonToCells(polygon, resolution, { containment = "center" } = {}) {
     return polygonToCells(polygon, resolution - 1, { containment });
   }
   const boundary2 = classifyBoundary(sampled, ringVecsList, prep);
-  if (resolution < FIRST_HILBERT_RESOLUTION) {
+  if (resolution < FIRST_CURVE_RESOLUTION) {
     const out = boundaryOutput(boundary2, overlapping);
     for (const cell of cellToChildren(WORLD_CELL, resolution)) {
       if (!boundary2.set.has(cell) && pointInPreparedPolygon(toCartesian(cellToSpherical(cell)), prep)) out.push(cell);
