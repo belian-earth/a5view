@@ -15,7 +15,7 @@ HTMLWidgets.widget({
     var currentBasemap = null;
     var currentOpacity = 0.6;
     var currentGlobe = false;
-    var labelLayerId = null;  // first symbol layer of the active style
+    var labelLayerId = null;  // first of the closing label layers of the style
     var hovered = null;          // { cell, hex, row } under the cursor
     var hoveredPentagon = null;  // hovered.cell (BigInt) or null
     var clickedPentagon = null;
@@ -519,18 +519,18 @@ HTMLWidgets.widget({
     }
 
     // Runs on every style load (initial + each basemap switch). Finds
-    // the first label layer so cells can be inserted beneath it, and
-    // re-applies projection + deck layers, which don't survive a
-    // style swap.
+    // the start of the style's closing run of label layers so cells can
+    // be inserted beneath it, and re-applies projection + deck layers,
+    // which don't survive a style swap. The first symbol layer is not
+    // enough: some styles (OpenFreeMap dark, liberty) put a water label
+    // or one-way arrows below the roads and buildings.
     function onStyleLoad() {
       var style = map.getStyle();
       labelLayerId = null;
       if (style && style.layers) {
-        for (var i = 0; i < style.layers.length; i++) {
-          if (style.layers[i].type === "symbol") {
-            labelLayerId = style.layers[i].id;
-            break;
-          }
+        for (var i = style.layers.length - 1; i >= 0; i--) {
+          if (style.layers[i].type !== "symbol") break;
+          labelLayerId = style.layers[i].id;
         }
       }
       applyProjection();
