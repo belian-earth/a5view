@@ -13,7 +13,8 @@ experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](h
 Interactive map viewer for [A5](https://a5geo.org) geospatial cells,
 powered by [deck.gl](https://deck.gl) over a
 [MapLibre](https://maplibre.org) basemap. Renders cells directly in the
-browser using deck.gl’s native A5Layer; no pre-computation of
+browser with deck.gl’s A5Layer and
+[a5-js](https://github.com/felixpalmer/a5); no pre-computation of
 boundaries needed. Intentionally minimal API for fast prototyping and
 exploration of A5 data.
 
@@ -23,6 +24,13 @@ exploration of A5 data.
 # install.packages("pak")
 pak::pak("belian-earth/a5view")
 ```
+
+a5view 0.3.0 draws [A5
+1.0](https://github.com/felixpalmer/a5/blob/main/CHANGELOG.md) cell ids,
+as produced by a5R \>= 0.9.9.9000. Ids written by earlier versions of
+a5R are valid 1.0 cells in the wrong place, so a5view cannot tell them
+apart and draws them where 1.0 puts them; convert them once with
+`a5R::a5_migrate()`. Use a5view 0.2.x for pre-1.0 ids.
 
 ## Usage
 
@@ -87,7 +95,8 @@ observeEvent(input$map_polygon_draw, {
   cells_in_poly <- a5R::a5_polygon_to_cells(
     wk::wkt(input$map_polygon_draw),
     resolution = 4L
-  )
+  ) |>
+    a5R::a5_uncompact()
   # ... use cells_in_poly, e.g. a5_view_update() with selection-driven fills.
 })
 ```

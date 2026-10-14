@@ -10,12 +10,11 @@ resolution <- 8
 # Initial centre: Edinburgh
 centre <- a5_lonlat_to_cell(-3.19, 55.95, resolution = resolution)
 
-#' Compute spherical cap cells with optional distances
-compute_cap <- function(cell, radius_km, uncompact = TRUE, dist = TRUE) {
-  cap_cells <- a5_spherical_cap(cell, radius_km * 1000)
-  if (uncompact) {
-    cap_cells <- a5_uncompact(cap_cells, resolution = resolution)
-  }
+#' Compute spherical cap cells with optional distances. The cap is a
+#' covering; its compacted cells do not nest in A5 1.0, so it is always
+#' expanded to `resolution` before drawing.
+compute_cap <- function(cell, radius_km, dist = TRUE) {
+  cap_cells <- a5_uncompact(a5_spherical_cap(cell, radius_km * 1000))
   if (length(cap_cells) == 0) {
     return(NULL)
   }
@@ -75,13 +74,6 @@ ui <- fluidPage(
     ),
     tags$span(id = "radius_val", class = "val", "50 km"),
     tags$span(class = "divider"),
-    tags$label(`for` = "uncompact_cb", "Uncompact"),
-    tags$input(
-      id = "uncompact_cb",
-      type = "checkbox",
-      checked = "checked"
-    ),
-    tags$span(class = "divider"),
     tags$label(`for` = "dist_fill_cb", "Distance fill"),
     tags$input(id = "dist_fill_cb", type = "checkbox", checked = "checked"),
     tags$span(class = "divider"),
@@ -94,9 +86,6 @@ ui <- fluidPage(
         document.getElementById('radius_val').textContent = v + ' km';
         Shiny.setInputValue('radius_km', parseInt(v));
       });
-      document.getElementById('uncompact_cb').addEventListener('change', function() {
-        Shiny.setInputValue('uncompact', this.checked);
-      });
       document.getElementById('dist_fill_cb').addEventListener('change', function() {
         Shiny.setInputValue('dist_fill', this.checked);
       });
@@ -105,7 +94,6 @@ ui <- fluidPage(
       });
       $(document).on('shiny:connected', function() {
         Shiny.setInputValue('radius_km', 50);
-        Shiny.setInputValue('uncompact', true);
         Shiny.setInputValue('dist_fill', true);
         Shiny.setInputValue('globe', false);
       });
@@ -151,7 +139,7 @@ server <- function(input, output, session) {
       }
     )
     if (!is.null(cells_in)) {
-      message("[draw] cells inside polygon: ", length(cells_in))
+      message("[draw] cells inside polygon: ", a5_count(cells_in))
     }
   })
 
@@ -201,9 +189,8 @@ server <- function(input, output, session) {
     if (is.null(radius)) {
       radius <- 50
     }
-    uc <- isTRUE(input$uncompact)
     use_dist <- isTRUE(input$dist_fill)
-    compute_cap(current_centre(), radius, uncompact = uc, dist = use_dist)
+    compute_cap(current_centre(), radius, dist = use_dist)
   })
 
   observe({

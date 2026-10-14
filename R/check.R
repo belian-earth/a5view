@@ -5,6 +5,12 @@ check_cells <- function(cells) {
   if (missing(cells)) {
     cli::cli_abort("{.arg cells} is required.")
   }
+  if (a5R::is_a5_covering(cells)) {
+    cli::cli_abort(c(
+      "{.arg cells} must be an {.cls a5_cell} vector, not an {.cls a5_covering}.",
+      "i" = "Use {.fn a5R::a5_uncompact} to get the cells of a covering."
+    ))
+  }
   if (!a5R::is_a5_cell(cells) && !is.data.frame(cells)) {
     cli::cli_abort(
       "{.arg cells} must be an {.cls a5_cell} vector or a data frame, not {.obj_type_friendly {cells}}."

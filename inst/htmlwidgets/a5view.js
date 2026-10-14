@@ -732,11 +732,13 @@ HTMLWidgets.widget({
 
     // The A5Layer is rebuilt only when something it depends on changes.
     // deck.gl diffs `data` by reference: a fresh object per redraw would
-    // make it recompute every cell boundary on each hover.
+    // make it recompute every cell boundary on each hover. T.A5Layer
+    // (lib/a5view-tiling/a5-layer.js) draws through a5-js 1.0, so it
+    // waits for window.A5; loadData() redraws once that resolves.
     var legacyLayer = null;
     var legacyLayerKey = null;
     function buildA5Layer(x) {
-      if (!x.data) return null;
+      if (!x.data || !window.A5) return null;
       var key = [dataVersion, currentOpacity, labelLayerId, x.stroked,
                  x.line_width, x.extruded, x.elevation_scale].join("|");
       if (legacyLayer && legacyLayerKey === key) return legacyLayer;
@@ -765,7 +767,7 @@ HTMLWidgets.widget({
       if (x.extruded && cols.elevation) {
         props.getElevation = function (_d, info) { return cols.elevation.get(info.index) || 0; };
       }
-      legacyLayer = new deck.A5Layer(props);
+      legacyLayer = new T.A5Layer(props);
       legacyLayerKey = key;
       return legacyLayer;
     }
@@ -789,8 +791,8 @@ HTMLWidgets.widget({
     // --- Layers -------------------------------------------------------
     function buildHighlightLayer() {
       var target = clickedPentagon || hoveredPentagon;
-      if (!target) return null;
-      return new deck.A5Layer({
+      if (!target || !window.A5) return null;
+      return new T.A5Layer({
         id: "a5-highlight",
         data: [{ pentagon: target }],
         getPentagon: function (d) { return d.pentagon; },
@@ -969,8 +971,8 @@ HTMLWidgets.widget({
         x.data = decodeArrowData(x.arrow_ipc);
       }
       redraw();
-      // Highlight + pyramid tiles need a5-js (lonLatToCell,
-      // cellToBoundary); rebuild once it's resolved.
+      // Cells, highlight and pyramid tiles all need a5-js
+      // (cellToBoundary, lonLatToCell); rebuild once it's resolved.
       TILING.ensureA5().then(redraw).catch(function (e) {
         console.error("[a5view] a5-js failed to load:", e);
       });
