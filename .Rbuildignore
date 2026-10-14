@@ -8,3 +8,8 @@
 ^scratch/
 ^dev\.R$
 ^data-raw$
+^codecov\.yml$
+^_pkgdown\.yml$
+^docs$
+^pkgdown$
+^inst/hex/a5viewhex\.R$

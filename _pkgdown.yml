@@ -1,0 +1,51 @@
+url: https://belian-earth.github.io/a5view/
+development:
+  mode: auto
+template:
+  bootstrap: 5
+  bootswatch: cosmo
+  bslib:
+    primary: '#74ac90ff'
+navbar:
+  structure:
+    left:
+    - reference
+    - intro
+    - articles
+    - news
+    right:
+    - search
+    - github
+  components:
+    github:
+      icon: fa-github
+      href: https://github.com/belian-earth/a5view
+reference:
+- title: Static plots
+  desc: Draw cells in ggplot2, alongside `geom_sf()` layers and in any projection.
+  contents:
+  - geom_a5
+- title: Interactive maps
+  desc: Draw cells on a web map with deck.gl and MapLibre.
+  contents:
+  - a5_view
+- title: Colour composites
+  desc: Map several bands or an embedding to per-cell RGB colours.
+  contents:
+  - cells_rgb
+  - cells_pca_rgb
+- title: Large datasets
+  desc: Build level-of-detail pyramids and view them without rebuilding.
+  contents:
+  - a5_build_pyramid
+  - a5_view_pyramid
+- title: Shiny
+  desc: Place maps in apps and update them in place.
+  contents:
+  - a5_viewOutput
+  - renderA5_view
+  - a5_view_update
+- title: Data
+  desc: Example data.
+  contents:
+  - s2_santiago

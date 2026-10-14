@@ -1,13 +1,14 @@
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
-# a5view
+# a5view <a href="https://belian-earth.github.io/a5view/"><img src="man/figures/logo.png" align="right" height="200" alt="a5view website" /></a>
 
 <!-- badges: start -->
 
 [![Lifecycle:
 experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)
 [![R-CMD-check](https://github.com/belian-earth/a5view/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/belian-earth/a5view/actions/workflows/R-CMD-check.yaml)
+[![Codecov test coverage](https://codecov.io/gh/belian-earth/a5view/graph/badge.svg)](https://app.codecov.io/gh/belian-earth/a5view)
 <!-- badges: end -->
 
 a5view visualises [A5](https://a5geo.org) cells in R.

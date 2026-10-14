@@ -4,3 +4,4 @@ dev.R
 scratch/
 /.quarto/
 **/*.quarto_ipynb
+docs
