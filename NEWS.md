@@ -42,6 +42,12 @@
   it draws as colours with no scale or legend. `a5_view()` treats it as
   before.
 
+* New dataset `aef_malawi`: 23,691 resolution-15 cells of the
+  AlphaEarth Foundations satellite embedding over central Malawi (three
+  embedding axes, CC-BY 4.0), for examples of colour mapping and
+  false-colour composites. `data-raw/aef_malawi.R` rebuilds it.
+* The README's ggplot2 examples now render, using `aef_malawi`.
+
 ## Internals
 
 * Vendored a5-js is 1.0.0-beta.2 (`inst/htmlwidgets/lib/a5-js/a5.js`). The
