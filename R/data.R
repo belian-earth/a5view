@@ -23,7 +23,7 @@
 #' @examples
 #' a5_view(s2_santiago, fill = cells_rgb(B04, B03, B02, range = c(300, 2800)))
 #'
-#' if (requireNamespace("ggplot2", quietly = TRUE)) {
+#' if (requireNamespace("sf", quietly = TRUE)) {
 #'   library(ggplot2)
 #'   ggplot(s2_santiago, aes(cell = cell, fill = (B08 - B04) / (B08 + B04))) +
 #'     geom_a5() +

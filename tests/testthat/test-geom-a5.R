@@ -1,4 +1,3 @@
-skip_if_not_installed("ggplot2")
 skip_if_not_installed("sf")
 
 sample_df <- function() {

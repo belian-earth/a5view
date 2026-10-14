@@ -3,6 +3,8 @@
 S3method("[",a5_rgb)
 S3method(c,a5_rgb)
 S3method(format,a5_rgb)
+S3method(ggplot2::scale_type,a5_cell)
+S3method(ggplot2::scale_type,a5_rgb)
 S3method(grid::makeContent,a5_grob)
 S3method(print,a5_rgb)
 S3method(vctrs::vec_cast,a5_rgb.a5_rgb)

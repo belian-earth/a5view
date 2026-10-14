@@ -26,6 +26,7 @@ Imports:
     base64enc,
     cli,
     geoarrowWidget,
+    ggplot2 (>= 3.5.0),
     grDevices,
     grid,
     htmlwidgets,
@@ -33,7 +34,6 @@ Imports:
     vctrs,
     yyjsonr
 Suggests:
-    ggplot2,
     irlba,
     png,
     ragg,
