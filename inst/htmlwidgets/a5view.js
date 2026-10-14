@@ -15,7 +15,7 @@ HTMLWidgets.widget({
     var currentBasemap = null;
     var currentOpacity = 0.6;
     var currentGlobe = false;
-    var labelLayerId = null;  // first symbol layer of the active style
+    var labelLayerId = null;  // first of the closing label layers of the style
     var hovered = null;          // { cell, hex, row } under the cursor
     var hoveredPentagon = null;  // hovered.cell (BigInt) or null
     var clickedPentagon = null;
@@ -519,18 +519,18 @@ HTMLWidgets.widget({
     }
 
     // Runs on every style load (initial + each basemap switch). Finds
-    // the first label layer so cells can be inserted beneath it, and
-    // re-applies projection + deck layers, which don't survive a
-    // style swap.
+    // the start of the style's closing run of label layers so cells can
+    // be inserted beneath it, and re-applies projection + deck layers,
+    // which don't survive a style swap. The first symbol layer is not
+    // enough: some styles (OpenFreeMap dark, liberty) put a water label
+    // or one-way arrows below the roads and buildings.
     function onStyleLoad() {
       var style = map.getStyle();
       labelLayerId = null;
       if (style && style.layers) {
-        for (var i = 0; i < style.layers.length; i++) {
-          if (style.layers[i].type === "symbol") {
-            labelLayerId = style.layers[i].id;
-            break;
-          }
+        for (var i = style.layers.length - 1; i >= 0; i--) {
+          if (style.layers[i].type !== "symbol") break;
+          labelLayerId = style.layers[i].id;
         }
       }
       applyProjection();
@@ -732,11 +732,13 @@ HTMLWidgets.widget({
 
     // The A5Layer is rebuilt only when something it depends on changes.
     // deck.gl diffs `data` by reference: a fresh object per redraw would
-    // make it recompute every cell boundary on each hover.
+    // make it recompute every cell boundary on each hover. T.A5Layer
+    // (lib/a5view-tiling/a5-layer.js) draws through a5-js 1.0, so it
+    // waits for window.A5; loadData() redraws once that resolves.
     var legacyLayer = null;
     var legacyLayerKey = null;
     function buildA5Layer(x) {
-      if (!x.data) return null;
+      if (!x.data || !window.A5) return null;
       var key = [dataVersion, currentOpacity, labelLayerId, x.stroked,
                  x.line_width, x.extruded, x.elevation_scale].join("|");
       if (legacyLayer && legacyLayerKey === key) return legacyLayer;
@@ -765,7 +767,7 @@ HTMLWidgets.widget({
       if (x.extruded && cols.elevation) {
         props.getElevation = function (_d, info) { return cols.elevation.get(info.index) || 0; };
       }
-      legacyLayer = new deck.A5Layer(props);
+      legacyLayer = new T.A5Layer(props);
       legacyLayerKey = key;
       return legacyLayer;
     }
@@ -789,8 +791,8 @@ HTMLWidgets.widget({
     // --- Layers -------------------------------------------------------
     function buildHighlightLayer() {
       var target = clickedPentagon || hoveredPentagon;
-      if (!target) return null;
-      return new deck.A5Layer({
+      if (!target || !window.A5) return null;
+      return new T.A5Layer({
         id: "a5-highlight",
         data: [{ pentagon: target }],
         getPentagon: function (d) { return d.pentagon; },
@@ -969,8 +971,8 @@ HTMLWidgets.widget({
         x.data = decodeArrowData(x.arrow_ipc);
       }
       redraw();
-      // Highlight + pyramid tiles need a5-js (lonLatToCell,
-      // cellToBoundary); rebuild once it's resolved.
+      // Cells, highlight and pyramid tiles all need a5-js
+      // (cellToBoundary, lonLatToCell); rebuild once it's resolved.
       TILING.ensureA5().then(redraw).catch(function (e) {
         console.error("[a5view] a5-js failed to load:", e);
       });

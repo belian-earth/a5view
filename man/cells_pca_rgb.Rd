@@ -28,8 +28,8 @@ because PCA components are arbitrary up to sign — e.g.
 of \code{1:3}.}
 }
 \value{
-An integer vector of packed RGB values, the same length as
-the number of rows in \code{x}.
+Packed RGB values (class \code{a5_rgb}, as from \code{\link[=cells_rgb]{cells_rgb()}}), the
+same length as the number of rows in \code{x}.
 }
 \description{
 Convenience helper for the common embedding-visualisation workflow:

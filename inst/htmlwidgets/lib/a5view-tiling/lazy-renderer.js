@@ -388,7 +388,7 @@
   function libUrls() {
     var a5 = [];
     if (window.A5ViewA5Url) a5.push(window.A5ViewA5Url);
-    a5.push("https://cdn.jsdelivr.net/npm/a5-js@0.10.0/+esm");
+    if (window.A5ViewA5Cdn) a5.push(window.A5ViewA5Cdn);
     var hyp = [];
     if (window.A5ViewHyparquetUrl) hyp.push(window.A5ViewHyparquetUrl);
     hyp.push("https://cdn.jsdelivr.net/npm/hyparquet@1.25.6/+esm");

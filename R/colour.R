@@ -20,8 +20,10 @@
 #' @param range Optional length-2 numeric `c(min, max)` shared across all
 #'   three channels. `NULL` (default) rescales each channel independently.
 #'
-#' @return An integer vector of packed RGB values, the same length as
-#'   the inputs.
+#' @return Packed RGB values (class `a5_rgb`, an integer vector), the
+#'   same length as the inputs. They print as hex colours. In ggplot2,
+#'   mapping them to `fill` in [geom_a5()] draws them as colours with no
+#'   scale or legend.
 #'
 #' @examples
 #' n <- 5
@@ -59,8 +61,52 @@ cells_rgb <- function(r, g, b, range = NULL) {
     bb <- rescale_byte_auto(b)
   }
 
-  out <- bitwOr(bitwOr(bitwShiftL(rb, 16L), bitwShiftL(gb, 8L)), bb)
-  attr(out, "a5_identity") <- TRUE
+  new_a5_rgb(bitwOr(bitwOr(bitwShiftL(rb, 16L), bitwShiftL(gb, 8L)), bb))
+}
+
+# Packed RGB as a light S3 class over integer. The class lets ggplot2
+# pick an identity fill scale by itself (scale_type.a5_rgb, registered in
+# .onLoad) and lets geom_a5() unpack the colours. It stays an ordinary
+# integer otherwise (arithmetic, comparisons, as.integer()); the methods
+# below keep the class through base and vctrs subsetting and combining,
+# which ggplot2 uses. The a5_identity attribute is what a5_view() checks
+# to switch on fill_identity.
+new_a5_rgb <- function(x) {
+  structure(as.integer(x), class = "a5_rgb", a5_identity = TRUE)
+}
+
+#' @export
+`[.a5_rgb` <- function(x, i) new_a5_rgb(unclass(x)[i])
+
+#' @export
+c.a5_rgb <- function(...) new_a5_rgb(unlist(lapply(list(...), unclass)))
+
+#' @export
+format.a5_rgb <- function(x, ...) a5_rgb_to_hex(x)
+
+#' @export
+print.a5_rgb <- function(x, ...) {
+  cat("<a5_rgb[", length(x), "]>\n", sep = "")
+  if (length(x) > 0L) print(format(x), quote = FALSE)
+  invisible(x)
+}
+
+#' @exportS3Method vctrs::vec_restore
+vec_restore.a5_rgb <- function(x, to, ...) new_a5_rgb(x)
+
+#' @exportS3Method vctrs::vec_ptype2
+vec_ptype2.a5_rgb.a5_rgb <- function(x, y, ...) new_a5_rgb(integer())
+
+#' @exportS3Method vctrs::vec_cast
+vec_cast.a5_rgb.a5_rgb <- function(x, to, ...) x
+
+#' @exportS3Method vctrs::vec_ptype_abbr
+vec_ptype_abbr.a5_rgb <- function(x, ...) "rgb"
+
+a5_rgb_to_hex <- function(x) {
+  v <- unclass(x)
+  out <- sprintf("#%06X", v)
+  out[is.na(v)] <- NA_character_
   out
 }
 
@@ -92,8 +138,8 @@ cells_rgb <- function(r, g, b, range = NULL) {
 #'   `c(1, -2, 3)` uses `-PC2` for green. Must be a signed permutation
 #'   of `1:3`.
 #'
-#' @return An integer vector of packed RGB values, the same length as
-#'   the number of rows in `x`.
+#' @return Packed RGB values (class `a5_rgb`, as from [cells_rgb()]), the
+#'   same length as the number of rows in `x`.
 #'
 #' @examples
 #' \dontrun{

@@ -62,6 +62,11 @@ prepare_data <- function(cells) {
 #'     each parent group. RGBA channels are averaged then rounded back to
 #'     uint8.
 #'
+#' A leaf's parent at each LOD is its supercell, the coarse cell that
+#' contains the leaf's centre. The A5 1.0 index parent is not spatially
+#' nested, so grouping by it would draw aggregates away from their
+#' leaves; supercells partition the leaves exactly.
+#'
 #' Grouping uses `vctrs::vec_group_id()` on the parent `a5_cell` vectors
 #' (hashed on the raw bytes), which is an order of magnitude cheaper than
 #' formatting hex keys.
@@ -114,7 +119,7 @@ build_a5_pyramid <- function(leaf_cells, df, data_resolution, lod_step,
   chunks <- vector("list", length(parent_lods))
   for (k in seq_along(parent_lods)) {
     lod <- parent_lods[[k]]
-    parents <- a5R::a5_cell_to_parent(leaf_cells, resolution = lod)
+    parents <- a5R::a5_cell_to_supercell(leaf_cells, resolution = lod)
     group <- vctrs::vec_group_id(parents)
     n_groups <- attr(group, "n")
 
@@ -179,7 +184,7 @@ build_a5_pyramid <- function(leaf_cells, df, data_resolution, lod_step,
 #' @param has_fill_value,has_rgba_cols,extruded Schema flags.
 #' @param row_group_size Integer. Cap on rows per parquet row group.
 #' @param pivot_offset Integer. Tile bucketing: rows at `lod` are grouped
-#'   by their parent at `lod - pivot_offset`. A5 cells have four
+#'   by their supercell at `lod - pivot_offset`. A5 cells have four
 #'   children, so `6` gives up to 4096 rows per row group. Bigger tiles
 #'   mean fewer deck.gl sub-layers per screen, which is the dominant
 #'   per-tile cost in the browser.
@@ -223,7 +228,7 @@ serialise_pyramid_to_parquet <- function(pdf, path,
       pieces <- chunk_indices(lod_idx, row_group_size)
       tile_ids <- rep(NA_character_, length(pieces))
     } else {
-      parents <- a5R::a5_cell_to_parent(cells[lod_idx], resolution = parent_lod)
+      parents <- a5R::a5_cell_to_supercell(cells[lod_idx], resolution = parent_lod)
       group <- vctrs::vec_group_id(parents)
       by_parent <- split(lod_idx, group)
       parent_hex <- format(parents[match(seq_len(attr(group, "n")), group)])

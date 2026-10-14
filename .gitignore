@@ -2,3 +2,5 @@
 dev.R
 .claude/
 scratch/
+/.quarto/
+**/*.quarto_ipynb
