@@ -33,7 +33,8 @@ mode, so \code{"auto"} stays vector when they are set.}
 their own resolution.}
 }
 \value{
-A ggplot2 layer.
+A list of a ggplot2 layer and a default \code{coord_sf()}, as
+\code{geom_sf()} returns.
 }
 \description{
 Draws A5 cells from a cell column, with any ggplot2 fill scale. Works
@@ -41,6 +42,11 @@ with \code{coord_cartesian()}, \code{coord_quickmap()} and \code{coord_sf()}, an
 combines with \code{geom_sf()} layers in the same plot.
 }
 \details{
+Like \code{geom_sf()}, the layer comes with a default \code{coord_sf()}: its crs
+is taken from the plot's sf layers, or is EPSG:4326 when there are
+none, so the map keeps a fixed geographic aspect ratio. Adding any
+coord replaces it.
+
 Large cell sets are drawn as a raster: each device pixel takes the
 colour of the cell containing its centre. This is exact at the output
 resolution and its cost depends on the number of pixels, not cells.

@@ -27,6 +27,11 @@ A5_RASTER_EDGE_PX <- 3
 #' with `coord_cartesian()`, `coord_quickmap()` and `coord_sf()`, and
 #' combines with `geom_sf()` layers in the same plot.
 #'
+#' Like `geom_sf()`, the layer comes with a default `coord_sf()`: its crs
+#' is taken from the plot's sf layers, or is EPSG:4326 when there are
+#' none, so the map keeps a fixed geographic aspect ratio. Adding any
+#' coord replaces it.
+#'
 #' Large cell sets are drawn as a raster: each device pixel takes the
 #' colour of the cell containing its centre. This is exact at the output
 #' resolution and its cost depends on the number of pixels, not cells.
@@ -43,7 +48,8 @@ A5_RASTER_EDGE_PX <- 3
 #' @param raster_dpi Pixel density for raster mode on vector devices
 #'   (PDF, SVG), which have no pixels of their own. Bitmap devices use
 #'   their own resolution.
-#' @return A ggplot2 layer.
+#' @return A list of a ggplot2 layer and a default `coord_sf()`, as
+#'   `geom_sf()` returns.
 #' @export
 geom_a5 <- function(mapping = NULL, data = NULL, ...,
                     render = c("auto", "vector", "raster"),
@@ -58,13 +64,30 @@ geom_a5 <- function(mapping = NULL, data = NULL, ...,
   # a sort over every cell. A constant group skips that.
   if (is.null(mapping)) mapping <- ggplot2::aes()
   if (is.null(mapping$group)) mapping$group <- 1L
-  ggplot2::layer(
+  layer <- ggplot2::layer(
     data = data, mapping = mapping,
     stat = protos$stat, geom = protos$geom, position = "identity",
     show.legend = show.legend, inherit.aes = inherit.aes,
     params = rlang::list2(
       render = render, raster_dpi = raster_dpi, na.rm = na.rm, ...
     )
+  )
+  # As geom_sf(): the layer brings a default coord_sf, which any coord
+  # the user adds replaces without a message.
+  list(layer, coord_a5_default())
+}
+
+# geom_sf()'s default coord_sf(default = TRUE), except that with no sf
+# layer to take a crs from it uses EPSG:4326 rather than none, so cells
+# alone get lon/lat axes with a fixed geographic aspect ratio, like
+# coord_sf(crs = 4326). Built fresh per call: coords record state.
+coord_a5_default <- function() {
+  ggplot2::ggproto(
+    "CoordSfA5", ggplot2::coord_sf(default = TRUE),
+    determine_crs = function(self, data) {
+      crs <- ggplot2::ggproto_parent(ggplot2::CoordSf, self)$determine_crs(data)
+      if (is.null(crs)) sf::st_crs(4326) else crs
+    }
   )
 }
 

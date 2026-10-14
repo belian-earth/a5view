@@ -97,11 +97,13 @@ test_that("cells_rgb() fills draw as colours with no scale or legend", {
   expect_length(ggplot2::get_guide_data(p, "fill"), 0L)
 })
 
-# Colour of the raster at panel npc (0.5, 0.5) for a plot.
-centre_colour <- function(p, render) {
+# Colour at the panel centre of `base + geom_a5(render) + extra`. The
+# extras come after the layer: like geom_sf(), geom_a5() brings a
+# default coord that replaces any coord added before it.
+centre_colour <- function(base, extra, render) {
   f <- withr::local_tempfile(fileext = ".png")
   ragg::agg_png(f, 300, 300)
-  print(p + geom_a5(render = render) + ggplot2::theme_void())
+  print(base + geom_a5(render = render) + extra + ggplot2::theme_void())
   grDevices::dev.off()
   img <- png::readPNG(f)
   img[150, 150, 1:3]
@@ -114,14 +116,52 @@ test_that("raster and vector agree under reversed and transformed axes", {
   df$rgb <- cells_rgb(seq_len(nrow(df)) %% 7, seq_len(nrow(df)) %% 5, seq_len(nrow(df)) %% 3)
   base <- ggplot2::ggplot(df, ggplot2::aes(cell = cell, fill = rgb))
   variants <- list(
-    plain = base,
-    scale_reverse = base + ggplot2::scale_x_reverse() + ggplot2::scale_y_reverse(),
-    coord_reverse = base + ggplot2::coord_cartesian(reverse = "xy", xlim = c(33.31, 33.36))
+    default_coord = list(),
+    cartesian = list(ggplot2::coord_cartesian()),
+    scale_reverse = list(
+      ggplot2::scale_x_reverse(), ggplot2::scale_y_reverse(), ggplot2::coord_cartesian()
+    ),
+    coord_reverse = list(ggplot2::coord_cartesian(reverse = "xy", xlim = c(33.31, 33.36))),
+    utm = list(ggplot2::coord_sf(crs = 32736))
   )
   # Vector mode anti-aliases cell edges (a few /255 near an edge); a
   # wrong cell differs by at least 1/6 in some channel.
   for (nm in names(variants)) {
-    diff <- abs(centre_colour(variants[[nm]], "raster") - centre_colour(variants[[nm]], "vector"))
+    diff <- abs(
+      centre_colour(base, variants[[nm]], "raster") -
+        centre_colour(base, variants[[nm]], "vector")
+    )
     expect_lt(max(diff), 0.06, label = nm)
+  }
+})
+
+test_that("geom_a5 brings a default lon/lat coord_sf, as geom_sf does", {
+  df <- sample_df()
+  p <- ggplot2::ggplot(df, ggplot2::aes(cell = cell)) + geom_a5()
+  b <- ggplot2::ggplot_build(p)
+  expect_s3_class(b$layout$coord, "CoordSf")
+  expect_identical(b$layout$panel_params[[1]]$crs, sf::st_crs(4326))
+  # Fixed aspect: cos(latitude) correction, as coord_sf(crs = 4326).
+  ref <- ggplot2::ggplot_build(p + ggplot2::coord_sf(crs = 4326, default_crs = 4326))
+  expect_equal(
+    b$layout$coord$aspect(b$layout$panel_params[[1]]),
+    ref$layout$coord$aspect(ref$layout$panel_params[[1]])
+  )
+
+  # A user coord replaces it silently.
+  expect_no_message(
+    pc <- ggplot2::ggplot_build(p + ggplot2::coord_cartesian())
+  )
+  expect_false(inherits(pc$layout$coord, "CoordSf"))
+
+  # With an sf layer, the crs comes from it whichever is added last.
+  pt <- sf::st_sf(geometry = sf::st_sfc(sf::st_point(c(500000, 8570000)), crs = 32736))
+  for (q in list(
+    p + ggplot2::geom_sf(data = pt, inherit.aes = FALSE),
+    ggplot2::ggplot() + ggplot2::geom_sf(data = pt) +
+      geom_a5(data = df, ggplot2::aes(cell = cell))
+  )) {
+    bq <- ggplot2::ggplot_build(q)
+    expect_identical(sf::st_crs(bq$layout$panel_params[[1]]$crs), sf::st_crs(32736))
   }
 })
