@@ -9,8 +9,8 @@
   version wrote it, so a5view cannot detect old ids and draws them in
   the wrong place without an error. Convert stored ids once with
   `a5R::a5_migrate()`, or re-index from coordinates.
-* Requires a5R >= 0.9.9.9000 (`Remotes: belian-earth/a5R`), the first
-  a5R on A5 1.0.
+* Requires a5R >= 0.9.9.9001 (`Remotes: belian-earth/a5R`): A5 1.0,
+  and `a5_cell_to_boundary_xy()` for `geom_a5()`.
 * Pyramid LODs now group leaves by supercell (`a5R::a5_cell_to_supercell()`,
   the coarse cell containing a leaf's centre) instead of by index parent.
   The A5 1.0 index hierarchy is not spatially nested, so index parents
@@ -29,7 +29,7 @@
   graticules. Like `geom_sf()`, it brings a default `coord_sf()` (crs
   from the plot's sf layers, else EPSG:4326), so maps keep a fixed
   geographic aspect ratio unless another coord is added. ggplot2 and sf
-  are suggested, not required.
+  are imported.
 * `geom_a5()` is built for large cell sets. One row per cell goes through
   ggplot2, and outlines are only generated at draw time. With
   `render = "auto"` (the default) cells smaller than about three device

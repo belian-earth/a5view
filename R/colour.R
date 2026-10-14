@@ -65,8 +65,8 @@ cells_rgb <- function(r, g, b, range = NULL) {
 }
 
 # Packed RGB as a light S3 class over integer. The class lets ggplot2
-# pick an identity fill scale by itself (scale_type.a5_rgb, registered in
-# .onLoad) and lets geom_a5() unpack the colours. It stays an ordinary
+# pick an identity fill scale by itself (scale_type.a5_rgb, so no legend)
+# and lets geom_a5() unpack the colours. It stays an ordinary
 # integer otherwise (arithmetic, comparisons, as.integer()); the methods
 # below keep the class through base and vctrs subsetting and combining,
 # which ggplot2 uses. The a5_identity attribute is what a5_view() checks
@@ -74,6 +74,9 @@ cells_rgb <- function(r, g, b, range = NULL) {
 new_a5_rgb <- function(x) {
   structure(as.integer(x), class = "a5_rgb", a5_identity = TRUE)
 }
+
+#' @exportS3Method ggplot2::scale_type
+scale_type.a5_rgb <- function(x) "identity"
 
 #' @export
 `[.a5_rgb` <- function(x, i) new_a5_rgb(unclass(x)[i])

@@ -21,23 +21,23 @@ Roxygen: list(markdown = TRUE)
 Depends:
     R (>= 3.5)
 Imports:
-    a5R (>= 0.9.9.9000),
+    a5R (>= 0.9.9.9001),
     arrow,
     base64enc,
     cli,
     geoarrowWidget,
+    ggplot2 (>= 3.5.0),
     grDevices,
     grid,
     htmlwidgets,
     rlang (>= 1.0.0),
+    sf (>= 1.0.0),
     vctrs,
     yyjsonr
 Suggests:
-    ggplot2,
     irlba,
     png,
     ragg,
-    sf,
     shiny,
     testthat (>= 3.0.0),
     withr,

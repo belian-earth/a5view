@@ -16,8 +16,6 @@
 #   - coord_sf: cells are lon/lat (EPSG:4326). The stat reports extents
 #     like StatSf does, and drawing projects lon/lat to the coord's crs,
 #     so geom_a5 and geom_sf layers share scales, limits and graticules.
-#
-# ggplot2 is in Suggests, so the ggproto objects are built on first use.
 
 A5_RASTER_EDGE_PX <- 3
 
@@ -55,10 +53,8 @@ geom_a5 <- function(mapping = NULL, data = NULL, ...,
                     render = c("auto", "vector", "raster"),
                     raster_dpi = 300,
                     na.rm = FALSE, show.legend = NA, inherit.aes = TRUE) {
-  rlang::check_installed(c("ggplot2", "sf", "wk"), reason = "to use `geom_a5()`.")
   render <- rlang::arg_match(render)
   check_number_decimal(raster_dpi, min = 1, arg = "raster_dpi")
-  protos <- a5_ggproto()
   # Groups mean nothing for cells, but ggplot2 builds them from every
   # discrete aesthetic: a per-cell colour string (identity fills) costs
   # a sort over every cell. A constant group skips that.
@@ -66,7 +62,7 @@ geom_a5 <- function(mapping = NULL, data = NULL, ...,
   if (is.null(mapping$group)) mapping$group <- 1L
   layer <- ggplot2::layer(
     data = data, mapping = mapping,
-    stat = protos$stat, geom = protos$geom, position = "identity",
+    stat = StatA5, geom = GeomA5, position = "identity",
     show.legend = show.legend, inherit.aes = inherit.aes,
     params = rlang::list2(
       render = render, raster_dpi = raster_dpi, na.rm = na.rm, ...
@@ -89,43 +85,6 @@ coord_a5_default <- function() {
       if (is.null(crs)) sf::st_crs(4326) else crs
     }
   )
-}
-
-a5_gg_cache <- new.env(parent = emptyenv())
-
-a5_ggproto <- function() {
-  if (is.null(a5_gg_cache$stat)) {
-    a5_gg_cache$stat <- ggplot2::ggproto(
-      "StatA5", ggplot2::Stat,
-      required_aes = "cell",
-      # As StatSf: compute_panel needs the coord to record extents.
-      compute_layer = function(self, data, params, layout) {
-        params$coord <- layout$coord
-        ggplot2::ggproto_parent(ggplot2::Stat, self)$compute_layer(data, params, layout)
-      },
-      # Cells travel through ggplot2 as hex strings: its missing-value
-      # checks split record columns such as a5_cell element by element
-      # (about 1.5 s per 200k cells, twice), while hex costs 0.07 s to
-      # format and 0.01 s to parse back.
-      setup_data = function(data, params) {
-        if (a5R::is_a5_cell(data$cell)) data$cell <- format(data$cell)
-        data$cell <- as.character(data$cell)
-        data
-      },
-      compute_panel = stat_a5_compute_panel
-    )
-    a5_gg_cache$geom <- ggplot2::ggproto(
-      "GeomA5", ggplot2::Geom,
-      required_aes = "cell",
-      default_aes = ggplot2::aes(
-        fill = "grey35", colour = NA, alpha = NA,
-        linewidth = 0.1, linetype = 1
-      ),
-      draw_key = ggplot2::draw_key_polygon,
-      draw_panel = geom_a5_draw_panel
-    )
-  }
-  list(stat = a5_gg_cache$stat, geom = a5_gg_cache$geom)
 }
 
 # --- Stat ------------------------------------------------------------------
@@ -506,3 +465,42 @@ a5_raster_grob <- function(x, view) {
     default.units = "npc", interpolate = FALSE
   )
 }
+
+# --- ggproto ---------------------------------------------------------------
+
+StatA5 <- ggplot2::ggproto(
+  "StatA5", ggplot2::Stat,
+  required_aes = "cell",
+  # As StatSf: compute_panel needs the coord to record extents.
+  compute_layer = function(self, data, params, layout) {
+    params$coord <- layout$coord
+    ggplot2::ggproto_parent(ggplot2::Stat, self)$compute_layer(data, params, layout)
+  },
+  # Cells travel through ggplot2 as hex strings: its missing-value
+  # checks split record columns such as a5_cell element by element
+  # (about 1.5 s per 200k cells, twice), while hex costs 0.07 s to
+  # format and 0.01 s to parse back.
+  setup_data = function(data, params) {
+    if (a5R::is_a5_cell(data$cell)) data$cell <- format(data$cell)
+    data$cell <- as.character(data$cell)
+    data
+  },
+  compute_panel = stat_a5_compute_panel
+)
+
+GeomA5 <- ggplot2::ggproto(
+  "GeomA5", ggplot2::Geom,
+  required_aes = "cell",
+  default_aes = ggplot2::aes(
+    fill = "grey35", colour = NA, alpha = NA,
+    linewidth = 0.1, linetype = 1
+  ),
+  draw_key = ggplot2::draw_key_polygon,
+  draw_panel = geom_a5_draw_panel
+)
+
+# ggplot2 looks for a scale for every aesthetic. The `cell` aesthetic is
+# an id, not a position or colour: "identity" makes ggplot2 look for
+# scale_cell_identity(), find none, and leave it alone without a message.
+#' @exportS3Method ggplot2::scale_type
+scale_type.a5_cell <- function(x) "identity"
