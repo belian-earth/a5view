@@ -1,17 +1,19 @@
 Package: a5view
-Title: Interactive Map Viewer for A5 Geospatial Cells
+Title: Visualise A5 Geospatial Cells
 Version: 0.3.0
 Authors@R: c(
     person("Hugh", "Graham", role = c("aut", "cre"),
            email = "hugh@belian.earth"),
     person("belian.earth", role = "cph")
     )
-Description: An 'htmlwidgets' viewer that renders 'A5' geospatial index
-    cells on an interactive map using 'deck.gl' over a 'MapLibre' basemap
-    ('OpenFreeMap' vector tiles, no API key). Supports colour mapping with a
-    legend, palette selection, basemap switching, opacity control, hover
-    tooltips, cell borders, a globe projection and precomputed
-    level-of-detail pyramids for large datasets.
+Description: Draws 'A5' geospatial index cells, as created by 'a5R', as
+    static plots and interactive maps. geom_a5() adds cells to 'ggplot2'
+    plots in any coord_sf() projection, switching to a raster at the
+    output resolution for large cell sets. a5_view() is an
+    'htmlwidgets' map that renders cells with 'deck.gl' over a 'MapLibre'
+    basemap ('OpenFreeMap' vector tiles, no API key), with colour mapping
+    and a legend, tooltips, a globe projection, 'Shiny' bindings and
+    precomputed level-of-detail pyramids for large datasets.
 License: Apache License (>= 2)
 Encoding: UTF-8
 LazyData: true

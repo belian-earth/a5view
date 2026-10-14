@@ -47,7 +47,16 @@
   green, red and near-infrared bands, CC-BY 4.0), for examples of
   true-colour composites and colour mapping. `data-raw/s2_santiago.R`
   rebuilds it.
-* The README's ggplot2 examples now render, using `s2_santiago`.
+* The README presents a5view as the visualisation companion to a5R,
+  covering ggplot2 and interactive maps, with rendered examples from
+  `s2_santiago`.
+
+## Bug fixes
+
+* On the dark and OSM basemaps, cells drew beneath roads, bridges and
+  buildings, because those styles place a label layer low in the stack
+  and cells were inserted below the first label layer. Cells now go
+  below the style's closing run of label layers only.
 
 ## Internals
 
