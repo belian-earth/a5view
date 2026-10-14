@@ -72,6 +72,26 @@ Features:
 - Optional polygon-draw toolbar (`draw_polygon = TRUE`) for selecting
   an area of interest
 
+## ggplot2
+
+`geom_a5()` draws cells in ggplot2, alongside `geom_sf()` layers and in
+any `coord_sf()` projection. Large cell sets are drawn as a raster at
+the output resolution, so a plot of millions of cells costs about the
+same as one of thousands.
+
+``` r
+library(ggplot2)
+
+ggplot(df, aes(cell = cell, fill = value)) +
+  geom_a5() +
+  scale_fill_viridis_c() +
+  coord_sf(crs = 32736, default_crs = 4326)
+
+# False-colour composites need no scale: cells_rgb() output is colour.
+ggplot(aef, aes(cell = cell, fill = cells_rgb(A10, A11, A12))) +
+  geom_a5()
+```
+
 ## Polygon draw mode (Shiny only)
 
 Setting `draw_polygon = TRUE` adds a draw-polygon toggle to the

@@ -22,12 +22,17 @@ Imports:
     cli,
     geoarrowWidget,
     grDevices,
+    grid,
     htmlwidgets,
     rlang (>= 1.0.0),
     vctrs,
     yyjsonr
 Suggests:
+    ggplot2,
     irlba,
+    png,
+    ragg,
+    sf,
     shiny,
     testthat (>= 3.0.0),
     withr,

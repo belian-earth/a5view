@@ -14,8 +14,10 @@ green and blue channels.}
 three channels. \code{NULL} (default) rescales each channel independently.}
 }
 \value{
-An integer vector of packed RGB values, the same length as
-the inputs.
+Packed RGB values (class \code{a5_rgb}, an integer vector), the
+same length as the inputs. They print as hex colours. In ggplot2,
+mapping them to \code{fill} in \code{\link[=geom_a5]{geom_a5()}} draws them as colours with no
+scale or legend.
 }
 \description{
 Convenience helper for the common workflow of rescaling three numeric

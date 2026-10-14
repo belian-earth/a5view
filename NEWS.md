@@ -20,6 +20,25 @@
   returned by `a5_grid_disk()`, `a5_spherical_cap()` and
   `a5_polygon_to_cells()` in a5R 1.0, and point to `a5R::a5_uncompact()`.
 
+## New features
+
+* New `geom_a5()` draws A5 cells in ggplot2 from a cell column:
+  `ggplot(df, aes(cell = cell, fill = value)) + geom_a5()`. It works with
+  `coord_cartesian()`, `coord_quickmap()` and `coord_sf()`, so it combines
+  with `geom_sf()` layers in any projection, sharing scales, limits and
+  graticules. ggplot2 and sf are suggested, not required.
+* `geom_a5()` is built for large cell sets. One row per cell goes through
+  ggplot2, and outlines are only generated at draw time. With
+  `render = "auto"` (the default) cells smaller than about three device
+  pixels are drawn as a raster: each pixel takes the colour of the cell
+  containing its centre, so the cost depends on the image size, not the
+  number of cells. `render = "vector"` and `render = "raster"` force a
+  mode. Cells crossing the antimeridian are split at +/-180 degrees.
+* `cells_rgb()` and `cells_pca_rgb()` return class `a5_rgb`, an integer
+  vector that prints as hex colours. Mapped to `fill` in `geom_a5()`,
+  it draws as colours with no scale or legend. `a5_view()` treats it as
+  before.
+
 ## Internals
 
 * Vendored a5-js is 1.0.0-beta.2 (`inst/htmlwidgets/lib/a5-js/a5.js`). The
