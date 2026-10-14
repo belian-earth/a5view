@@ -12,8 +12,9 @@
   the wrong place without an error. Convert stored ids once with
   [`a5R::a5_migrate()`](https://belian-earth.github.io/a5R/reference/a5_migrate.html),
   or re-index from coordinates.
-- Requires a5R \>= 0.9.9.9000 (`Remotes: belian-earth/a5R`), the first
-  a5R on A5 1.0.
+- Requires a5R \>= 0.9.9.9001 (`Remotes: belian-earth/a5R`): A5 1.0, and
+  `a5_cell_to_boundary_xy()` for
+  [`geom_a5()`](https://belian-earth.github.io/a5view/reference/geom_a5.md).
 - Pyramid LODs now group leaves by supercell
   ([`a5R::a5_cell_to_supercell()`](https://belian-earth.github.io/a5R/reference/a5_spatial_hierarchy.html),
   the coarse cell containing a leaf’s centre) instead of by index
@@ -48,7 +49,7 @@
   [`coord_sf()`](https://ggplot2.tidyverse.org/reference/ggsf.html) (crs
   from the plot’s sf layers, else EPSG:4326), so maps keep a fixed
   geographic aspect ratio unless another coord is added. ggplot2 and sf
-  are suggested, not required.
+  are imported.
 
 - [`geom_a5()`](https://belian-earth.github.io/a5view/reference/geom_a5.md)
   is built for large cell sets. One row per cell goes through ggplot2,
