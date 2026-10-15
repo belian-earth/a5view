@@ -272,7 +272,7 @@ serialise_pyramid_to_parquet <- function(pdf, path,
     lat <- xy$y[sl]
     lon_rng <- range(lon)
     lat_rng <- range(lat)
-    pad_lat <- as.numeric(edge_m[k]) / 111320
+    pad_lat <- as.numeric(edge_m[k]) / 111195
     pad_lon <- pad_lat / max(cos(max(abs(lat_rng)) * pi / 180), 0.05)
     west <- lon_rng[1] - pad_lon
     east <- lon_rng[2] + pad_lon
@@ -293,7 +293,8 @@ serialise_pyramid_to_parquet <- function(pdf, path,
   }
 
   schema_kv <- list(
-    a5view_row_groups = yyjsonr::write_json_str(rg_index, auto_unbox = TRUE)
+    a5view_row_groups = yyjsonr::write_json_str(rg_index, auto_unbox = TRUE),
+    a5_index = A5_INDEX_VERSION
   )
   if (!is.null(meta) && length(meta) > 0L) {
     schema_kv$a5view_meta <- yyjsonr::write_json_str(meta, auto_unbox = TRUE)
@@ -325,16 +326,25 @@ serialise_pyramid_to_parquet <- function(pdf, path,
   invisible(list(n_row_groups = length(plan_indices), path = path))
 }
 
+# The A5 index version of the cell ids a pyramid file holds, recorded
+# under the `a5_index` KV key. A5 1.0 renumbered every cell, and an id
+# does not say which version wrote it.
+A5_INDEX_VERSION <- "1.0"
+
 #' Read the embedded `a5view_meta` KV entry from a pyramid parquet file
 #'
-#' Returns the parsed JSON object, or `NULL` if the entry is missing.
+#' Returns the parsed JSON object with the file's `a5_index` KV entry
+#' as its `a5_index` element (`NULL` when absent), or `NULL` if the
+#' `a5view_meta` entry is missing.
 #' @noRd
 read_pyramid_meta <- function(path) {
   reader <- arrow::ParquetFileReader$create(path)
   kv <- reader$GetSchema()$metadata
   json <- kv[["a5view_meta"]]
   if (is.null(json)) return(NULL)
-  yyjsonr::read_json_str(json)
+  meta <- yyjsonr::read_json_str(json)
+  meta$a5_index <- kv[["a5_index"]]
+  meta
 }
 
 #' Resolve elevation column name from NSE expression
@@ -489,6 +499,12 @@ resolve_tooltip_cols <- function(tooltip, prep, aggregate = "none") {
       "i" = "Available columns: {.val {avail}}."
     ))
   }
+  if ("cell" %in% tooltip) {
+    cli::cli_abort(c(
+      "{.arg tooltip} cannot show a column named {.val cell}.",
+      "i" = "The cell id travels to the browser as {.val cell}, and the tooltip always shows it. Rename the column."
+    ))
+  }
   non_atomic <- tooltip[!vapply(prep$extra[tooltip], is.atomic, logical(1))]
   if (length(non_atomic) > 0L) {
     cli::cli_abort(
@@ -508,14 +524,14 @@ resolve_tooltip_cols <- function(tooltip, prep, aggregate = "none") {
 #' Build the Arrow table shipped to the browser
 #'
 #' One place defines the wire schema for both the inline IPC path and
-#' the parquet pyramid path: `pentagon` (fixed-width hex via
+#' the parquet pyramid path: `cell` (fixed-width hex via
 #' `a5R::a5_cell_to_arrow` on the `cell` column), optional `_lod`, `_fill_value`,
 #' `_fill_r/g/b/a`, `_elevation`, followed by any extra tooltip columns.
 #' @noRd
 payload_arrow_table <- function(pdf, has_lod, has_fill_value,
                                 has_rgba_cols, extruded, extra = list()) {
   u8 <- function(x) arrow::Array$create(x, type = arrow::uint8())
-  cols <- list(pentagon = a5R::a5_cell_to_arrow(pdf[["cell"]]))
+  cols <- list(cell = a5R::a5_cell_to_arrow(pdf[["cell"]]))
   if (has_lod) cols[["_lod"]] <- u8(pdf[["_lod"]])
   if (has_fill_value) {
     # float32 is plenty for a tooltip readout and halves the column.

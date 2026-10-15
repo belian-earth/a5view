@@ -16,6 +16,9 @@
   The A5 1.0 index hierarchy is not spatially nested, so index parents
   would draw aggregates away from their leaves. Pyramids built with
   `a5_build_pyramid()` by 0.2.x hold pre-1.0 ids and must be rebuilt.
+* Pyramid files name the cell id column `cell` (was `pentagon`) and
+  record the A5 index version as `a5_index = "1.0"` in their parquet
+  metadata. `a5_view_pyramid()` refuses files without it.
 * `a5_view()` and `a5_view_update()` refuse an `a5_covering`, as
   returned by `a5_grid_disk()`, `a5_spherical_cap()` and
   `a5_polygon_to_cells()` in a5R 1.0, and point to `a5R::a5_uncompact()`.

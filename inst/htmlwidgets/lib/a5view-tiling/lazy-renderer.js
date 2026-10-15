@@ -229,7 +229,7 @@
         var rings = new Array(n);
         var nv = 0;
         for (var i = 0; i < n; i++) {
-          var cell = toBigIntCell(rows[i].pentagon);
+          var cell = toBigIntCell(rows[i].cell);
           cells[i] = cell;
           var ring = A5.cellToBoundary(cell, { closedRing: false });
           rings[i] = ring;
@@ -976,7 +976,7 @@
       if (!hit) return null;
       var geom = decodedCache.get(hit[0]);
       if (!geom) return null;
-      var row = { pentagon: geom.cells[hit[1]] };
+      var row = { cell: geom.cells[hit[1]] };
       if (geom.values) row._fill_value = geom.values[hit[1]];
       if (geom.elevation) row._elevation = geom.elevation[hit[1]];
       return row;

@@ -670,7 +670,7 @@ HTMLWidgets.widget({
       return {
         table: table,
         length: table.numRows,
-        pentagons: table.getChild("pentagon"),
+        cells: table.getChild("cell"),
         fillValues: table.getChild("_fill_value"),
         fillR: table.getChild("_fill_r"),
         fillG: table.getChild("_fill_g"),
@@ -716,7 +716,7 @@ HTMLWidgets.widget({
       if (!rowIndex || rowIndexVersion !== dataVersion) {
         rowIndex = new Map();
         var n = cols.length;
-        for (var i = 0; i < n; i++) rowIndex.set(pentToHex(cols.pentagons.get(i)), i);
+        for (var i = 0; i < n; i++) rowIndex.set(pentToHex(cols.cells.get(i)), i);
         rowIndexVersion = dataVersion;
       }
       var idx = rowIndex.get(hex);
@@ -748,7 +748,7 @@ HTMLWidgets.widget({
       var props = {
         id: "a5-layer",
         data: cols.deckData,
-        getPentagon: function (_d, info) { return cols.pentagons.get(info.index); },
+        getPentagon: function (_d, info) { return cols.cells.get(info.index); },
         getFillColor: function (_d, info) {
           var off = info.index * 4;
           return [fillArr[off], fillArr[off + 1], fillArr[off + 2], fillArr[off + 3]];

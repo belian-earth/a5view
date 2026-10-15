@@ -551,3 +551,36 @@ test_that("a5_view_update returns invisible NULL", {
   expect_null(result)
   expect_false(is.null(captured))
 })
+
+test_that("the cell id travels as a `cell` column", {
+  cells <- make_cells(3)
+  ipc <- base64enc::base64decode(a5_view(cells)$x$arrow_ipc)
+  tbl <- arrow::read_ipc_stream(ipc, as_data_frame = FALSE)
+  expect_identical(names(tbl)[1], "cell")
+  expect_identical(format(a5R::a5_cell_from_arrow(tbl$cell)), format(cells))
+})
+
+test_that("tooltip refuses a column named cell", {
+  df <- data.frame(id = make_cells(3), cell = c("a", "b", "c"))
+  expect_error(a5_view(df, tooltip = "cell"), "Rename the column")
+})
+
+test_that("pyramid files record the A5 index version and name the cell column", {
+  path <- withr::local_tempfile(fileext = ".parquet")
+  a5_build_pyramid(make_cells(3, res = 8), path)
+  reader <- arrow::ParquetFileReader$create(path)
+  expect_identical(reader$GetSchema()$metadata[["a5_index"]], "1.0")
+  expect_true("cell" %in% names(reader$GetSchema()))
+  expect_s3_class(a5_view_pyramid(path), "a5view")
+})
+
+test_that("a5_view_pyramid refuses files without an A5 index version", {
+  path <- withr::local_tempfile(fileext = ".parquet")
+  a5_build_pyramid(make_cells(3, res = 8), path)
+  tbl <- arrow::read_parquet(path, as_data_frame = FALSE)
+  kv <- tbl$schema$metadata
+  kv$a5_index <- NULL
+  old <- withr::local_tempfile(fileext = ".parquet")
+  arrow::write_parquet(tbl$ReplaceSchemaMetadata(kv), old)
+  expect_error(a5_view_pyramid(old), "Rebuild it")
+})

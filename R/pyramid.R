@@ -145,6 +145,12 @@ a5_view_pyramid <- function(
       i = "Expected an {.code a5view_meta} KV entry written by {.fn a5_build_pyramid}."
     ))
   }
+  if (!identical(meta$a5_index, A5_INDEX_VERSION)) {
+    cli::cli_abort(c(
+      "{.arg path} was not built for A5 {A5_INDEX_VERSION} cell ids.",
+      i = "Files from older a5view versions record no {.code a5_index} and may hold pre-1.0 ids, which draw in the wrong place. Rebuild it with {.fn a5_build_pyramid}."
+    ))
+  }
 
   view_state <- meta$view_state
   if (!is.null(lng)) view_state$longitude <- lng

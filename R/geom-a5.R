@@ -147,7 +147,7 @@ a5_cell_extent <- function(cells) {
   res <- a5R::a5_get_resolution(cells)
   xy <- unclass(a5R::a5_cell_to_lonlat(cells))
   edge_m <- as.numeric(a5R::a5_cell_edge_length_avg(res))
-  pad_lat <- edge_m / 111320
+  pad_lat <- edge_m / 111195 # metres per degree of latitude, authalic sphere
   pad_lon <- pad_lat / pmax(cos(xy$y * pi / 180), 0.05)
   out <- list(
     lon = xy$x, lat = xy$y,
