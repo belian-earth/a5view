@@ -94,7 +94,7 @@ test_that("a5-js version is declared once and matches the yaml", {
   expect_length(ver, 1L)
 
   # htmltools takes numeric versions only, so the yaml writes
-  # "1.0.0-beta.2" as "1.0.0-2".
+  # "1.0.0-beta.3" as "1.0.0-3".
   yaml <- readLines(system.file("htmlwidgets", "a5view.yaml", package = "a5view"))
   i <- grep("name: a5-js", yaml, fixed = TRUE)
   expect_identical(
