@@ -68,7 +68,11 @@
 #'   itself does not visualise which cells fall inside the polygon:
 #'   resolve the WKT server-side (e.g. with
 #'   [a5R::a5_polygon_to_cells()]) and update the map fills via
-#'   [a5_view_update()]. Only useful in a Shiny context.
+#'   [a5_view_update()]. The outline is drawn with straight edges on the
+#'   Web Mercator map, but [a5R::a5_polygon_to_cells()] reads edges as
+#'   great circles, so along a long edge the selected cells can stray
+#'   from the outline; place more vertices to keep them close. Only
+#'   useful in a Shiny context.
 #'   Default: `FALSE`.
 #' @param aggregate How parent cells are summarised when zooming out.
 #'   One of:
