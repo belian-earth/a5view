@@ -38,7 +38,15 @@ a5_view(
 
   An
   [a5R::a5_cell](https://belian-earth.github.io/a5R/reference/a5_cell.html)
-  vector, or a data frame / tibble containing an `a5_cell` column.
+  or
+  [a5R::a5_covering](https://belian-earth.github.io/a5R/reference/a5_covering.html)
+  vector, or a data frame / tibble containing a column of either. A
+  covering is drawn as the cells it stores, at their mixed resolutions;
+  uncompact it with
+  [`a5R::a5_uncompact()`](https://belian-earth.github.io/a5R/reference/a5_compaction.html)
+  first to draw its cells at one resolution. Each row of a covering
+  column is repeated once per stored cell. Pyramids (`aggregate` other
+  than `"none"`) need cells at one resolution.
 
 - fill:
 
@@ -155,6 +163,10 @@ a5_view(
   [`a5R::a5_polygon_to_cells()`](https://belian-earth.github.io/a5R/reference/a5_polygon_to_cells.html))
   and update the map fills via
   [`a5_view_update()`](https://belian-earth.github.io/a5view/reference/a5_view_update.md).
+  The outline is drawn with straight edges on the Web Mercator map, but
+  [`a5R::a5_polygon_to_cells()`](https://belian-earth.github.io/a5R/reference/a5_polygon_to_cells.html)
+  reads edges as great circles, so along a long edge the selected cells
+  can stray from the outline; place more vertices to keep them close.
   Only useful in a Shiny context. Default: `FALSE`.
 
 - aggregate:

@@ -28,9 +28,12 @@ geom_a5(
 
 - mapping:
 
-  Aesthetic mappings. `cell` is required: an `a5_cell` vector or hex
-  strings. `fill`, `alpha`, `colour`, `linewidth` and `linetype` are
-  understood.
+  Aesthetic mappings. `cell` is required: an `a5_cell` vector, hex
+  strings, or an
+  [a5R::a5_covering](https://belian-earth.github.io/a5R/reference/a5_covering.html)
+  vector, drawn as the cells each covering stores (uncompact it first to
+  draw its cells at one resolution). `fill`, `alpha`, `colour`,
+  `linewidth` and `linetype` are understood.
 
 - data, show.legend, inherit.aes, na.rm, ...:
 

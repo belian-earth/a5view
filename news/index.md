@@ -13,7 +13,8 @@
   [`a5R::a5_migrate()`](https://belian-earth.github.io/a5R/reference/a5_migrate.html),
   or re-index from coordinates.
 - Requires a5R \>= 0.9.9.9001 (`Remotes: belian-earth/a5R`): A5 1.0, and
-  `a5_cell_to_boundary_xy()` for
+  [`a5_cell_to_boundary_xy()`](https://belian-earth.github.io/a5R/reference/a5_cell_to_boundary_xy.html)
+  for
   [`geom_a5()`](https://belian-earth.github.io/a5view/reference/geom_a5.md).
 - Pyramid LODs now group leaves by supercell
   ([`a5R::a5_cell_to_supercell()`](https://belian-earth.github.io/a5R/reference/a5_spatial_hierarchy.html),
@@ -23,15 +24,30 @@
   with
   [`a5_build_pyramid()`](https://belian-earth.github.io/a5view/reference/a5_build_pyramid.md)
   by 0.2.x hold pre-1.0 ids and must be rebuilt.
-- [`a5_view()`](https://belian-earth.github.io/a5view/reference/a5_view.md)
-  and
-  [`a5_view_update()`](https://belian-earth.github.io/a5view/reference/a5_view_update.md)
-  refuse an `a5_covering`, as returned by `a5_grid_disk()`,
-  `a5_spherical_cap()` and `a5_polygon_to_cells()` in a5R 1.0, and point
-  to
-  [`a5R::a5_uncompact()`](https://belian-earth.github.io/a5R/reference/a5_compaction.html).
+- Pyramid files name the cell id column `cell` (was `pentagon`) and
+  record the A5 index version as `a5_index = "1.0"` in their parquet
+  metadata.
+  [`a5_view_pyramid()`](https://belian-earth.github.io/a5view/reference/a5_view_pyramid.md)
+  refuses files without it.
 
 ### New features
+
+- [`a5_view()`](https://belian-earth.github.io/a5view/reference/a5_view.md),
+  [`a5_view_update()`](https://belian-earth.github.io/a5view/reference/a5_view_update.md),
+  [`a5_build_pyramid()`](https://belian-earth.github.io/a5view/reference/a5_build_pyramid.md)
+  and
+  [`geom_a5()`](https://belian-earth.github.io/a5view/reference/geom_a5.md)
+  accept an `a5_covering`, as returned by
+  [`a5_grid_disk()`](https://belian-earth.github.io/a5R/reference/a5_grid_disk.html),
+  [`a5_spherical_cap()`](https://belian-earth.github.io/a5R/reference/a5_spherical_cap.html)
+  and
+  [`a5_polygon_to_cells()`](https://belian-earth.github.io/a5R/reference/a5_polygon_to_cells.html)
+  in a5R 1.0, alone or as a data frame column. It is drawn as the cells
+  it stores, at their mixed resolutions; uncompact it first with
+  [`a5R::a5_uncompact()`](https://belian-earth.github.io/a5R/reference/a5_compaction.html)
+  to draw its cells at one resolution. Widget tooltips find cells at
+  every resolution present. Pyramids still need cells at one resolution
+  and say so.
 
 - New
   [`geom_a5()`](https://belian-earth.github.io/a5view/reference/geom_a5.md)
@@ -96,8 +112,11 @@
   (`lib/a5view-tiling/a5-layer.js`) that takes boundaries from the
   vendored a5-js 1.0. It can be dropped once deck.gl moves to a5-js 1.0.
 - New tests check the vendored a5-js against a5R: `cellToBoundary()` and
-  `lonLatToCell()` agree with `a5_cell_to_boundary()` and
-  `a5_lonlat_to_cell()` at resolutions 0 to 18.
+  `lonLatToCell()` agree with
+  [`a5_cell_to_boundary()`](https://belian-earth.github.io/a5R/reference/a5_cell_to_boundary.html)
+  and
+  [`a5_lonlat_to_cell()`](https://belian-earth.github.io/a5R/reference/a5_coordinates.html)
+  at resolutions 0 to 18.
 - [`geom_a5()`](https://belian-earth.github.io/a5view/reference/geom_a5.md)
   takes cell outlines from
   [`a5R::a5_cell_to_boundary_xy()`](https://belian-earth.github.io/a5R/reference/a5_cell_to_boundary_xy.html),

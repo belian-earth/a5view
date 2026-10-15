@@ -98,6 +98,10 @@ a5_view_pyramid(
   [`a5R::a5_polygon_to_cells()`](https://belian-earth.github.io/a5R/reference/a5_polygon_to_cells.html))
   and update the map fills via
   [`a5_view_update()`](https://belian-earth.github.io/a5view/reference/a5_view_update.md).
+  The outline is drawn with straight edges on the Web Mercator map, but
+  [`a5R::a5_polygon_to_cells()`](https://belian-earth.github.io/a5R/reference/a5_polygon_to_cells.html)
+  reads edges as great circles, so along a long edge the selected cells
+  can stray from the outline; place more vertices to keep them close.
   Only useful in a Shiny context. Default: `FALSE`.
 
 ## Value

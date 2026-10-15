@@ -28,6 +28,7 @@ bytes are embedded in the widget as base64."><meta property="og:image" content="
 
     <div id="navbar" class="collapse navbar-collapse ms-3">
       <ul class="navbar-nav me-auto"><li class="active nav-item"><a class="nav-link" href="../reference/index.html">Reference</a></li>
+<li class="nav-item"><a class="nav-link" href="../articles/a5view.html">Get started</a></li>
 <li class="nav-item"><a class="nav-link" href="../news/index.html">Changelog</a></li>
       </ul><ul class="navbar-nav"><li class="nav-item"><form class="form-inline" role="search">
  <input class="form-control" type="search" name="search-input" id="search-input" autocomplete="off" aria-label="Search site" placeholder="Search for" data-search-index="../search.json"></form></li>
@@ -142,7 +143,11 @@ suppressed and cell-pick click events do not fire. The widget
 itself does not visualise which cells fall inside the polygon:
 resolve the WKT server-side (e.g. with
 <code><a href="https://belian-earth.github.io/a5R/reference/a5_polygon_to_cells.html" class="external-link">a5R::a5_polygon_to_cells()</a></code>) and update the map fills via
-<code><a href="a5_view_update.html">a5_view_update()</a></code>. Only useful in a Shiny context.
+<code><a href="a5_view_update.html">a5_view_update()</a></code>. The outline is drawn with straight edges on the
+Web Mercator map, but <code><a href="https://belian-earth.github.io/a5R/reference/a5_polygon_to_cells.html" class="external-link">a5R::a5_polygon_to_cells()</a></code> reads edges as
+great circles, so along a long edge the selected cells can stray
+from the outline; place more vertices to keep them close. Only
+useful in a Shiny context.
 Default: <code>FALSE</code>.</p></dd>
 
 </dl></div>

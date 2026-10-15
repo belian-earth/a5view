@@ -20,6 +20,7 @@ combines with geom_sf() layers in the same plot."><meta property="og:image" cont
 
     <div id="navbar" class="collapse navbar-collapse ms-3">
       <ul class="navbar-nav me-auto"><li class="active nav-item"><a class="nav-link" href="../reference/index.html">Reference</a></li>
+<li class="nav-item"><a class="nav-link" href="../articles/a5view.html">Get started</a></li>
 <li class="nav-item"><a class="nav-link" href="../news/index.html">Changelog</a></li>
       </ul><ul class="navbar-nav"><li class="nav-item"><form class="form-inline" role="search">
  <input class="form-control" type="search" name="search-input" id="search-input" autocomplete="off" aria-label="Search site" placeholder="Search for" data-search-index="../search.json"></form></li>
@@ -62,7 +63,9 @@ combines with <code><a href="https://ggplot2.tidyverse.org/reference/ggsf.html" 
 
 <dl><dt id="arg-mapping">mapping<a class="anchor" aria-label="anchor" href="#arg-mapping"></a></dt>
 <dd><p>Aesthetic mappings. <code>cell</code> is required: an <code>a5_cell</code>
-vector or hex strings. <code>fill</code>, <code>alpha</code>, <code>colour</code>, <code>linewidth</code> and
+vector, hex strings, or an <a href="https://belian-earth.github.io/a5R/reference/a5_covering.html" class="external-link">a5R::a5_covering</a> vector, drawn as the
+cells each covering stores (uncompact it first to draw its cells at
+one resolution). <code>fill</code>, <code>alpha</code>, <code>colour</code>, <code>linewidth</code> and
 <code>linetype</code> are understood.</p></dd>
 
 
