@@ -7,7 +7,7 @@ find_cell_column <- function(df) {
     if (a5R::is_a5_cell(df[[nm]])) return(nm)
   }
   cli::cli_abort(
-    "No {.cls a5_cell} column found in {.arg cells}. Columns present: {.val {names(df)}}."
+    "No {.cls a5_cell} or {.cls a5_covering} column found in {.arg cells}. Columns present: {.val {names(df)}}."
   )
 }
 
@@ -74,7 +74,8 @@ prepare_data <- function(cells) {
 #' @param leaf_cells `a5_cell` vector at the data resolution.
 #' @param df Data frame with a `cell` column plus optional
 #'   `_fill_r/g/b/a`, `_fill_value`, `_elevation` columns.
-#' @param data_resolution Integer A5 resolution of `leaf_cells`.
+#' @param data_resolution Integer A5 resolution of `leaf_cells`: one
+#'   only, as each LOD aggregates a single leaf resolution.
 #' @param lod_step Integer >= 1, gap between successive LODs.
 #' @param aggregate One of `"rep_child"`, `"mean"`.
 #' @param min_lod Lowest LOD to precompute (default 2).
@@ -84,6 +85,12 @@ prepare_data <- function(cells) {
 #' @noRd
 build_a5_pyramid <- function(leaf_cells, df, data_resolution, lod_step,
                              aggregate, min_lod = 2L) {
+  if (length(data_resolution) > 1L) {
+    cli::cli_abort(c(
+      "A pyramid needs cells at one resolution, not {sort(data_resolution)}.",
+      "i" = "Draw mixed resolutions with {.code aggregate = \"none\"} in {.fn a5_view}."
+    ))
+  }
   data_resolution <- as.integer(data_resolution)
   lod_step <- as.integer(lod_step)
   min_lod <- as.integer(min_lod)
@@ -425,10 +432,12 @@ guess_zoom <- function(xy) {
 #' @param elev_expr Substituted `elevation` argument.
 #' @return `NULL` when no non-NA cells remain, else a list with `df`,
 #'   `leaf_cells`, `extra`, `fill_color`, `legend`, `has_fill_value`,
-#'   `has_rgba_cols`, `extruded` and `data_resolution`.
+#'   `has_rgba_cols`, `extruded` and `data_resolution` (the
+#'   resolutions present, finest first).
 #' @noRd
 prepare_view_data <- function(cells, fill_quo, fill_identity, palette,
                               elev_expr = NULL) {
+  cells <- covering_to_cells(cells)
   n_cells <- if (a5R::is_a5_cell(cells)) length(cells) else nrow(cells)
   fill_resolved <- resolve_fill(cells, fill_quo, n_cells)
 
@@ -479,7 +488,10 @@ prepare_view_data <- function(cells, fill_quo, fill_identity, palette,
     has_fill_value = "_fill_value" %in% names(df),
     has_rgba_cols = "_fill_r" %in% names(df),
     extruded = extruded,
-    data_resolution = as.integer(a5R::a5_get_resolution(prepared$a5_cells[[1]]))
+    data_resolution = sort(
+      unique(as.integer(a5R::a5_get_resolution(prepared$a5_cells))),
+      decreasing = TRUE
+    )
   )
 }
 
@@ -600,4 +612,32 @@ encode_view_data <- function(prep, aggregate, lod_step,
     parquet_payload(path, session = session, temp = TRUE),
     list(lod_resolutions = as.list(as.integer(pyramid$lod_resolutions)))
   )
+}
+
+#' Turn `a5_covering` input into cells
+#'
+#' A covering is drawn as the cells it stores, at their mixed
+#' resolutions; uncompacting is the caller's choice. A data frame column
+#' of coverings is used when the frame has no `a5_cell` column, and each
+#' row is repeated once per stored cell so its other columns travel with
+#' them. Anything else is returned unchanged.
+#' @noRd
+covering_to_cells <- function(cells) {
+  if (a5R::is_a5_covering(cells)) return(a5R::a5_covering_stored(cells))
+  if (!is.data.frame(cells)) return(cells)
+  if (any(vapply(cells, a5R::is_a5_cell, logical(1)))) return(cells)
+  is_cov <- vapply(cells, a5R::is_a5_covering, logical(1))
+  if (!any(is_cov)) return(cells)
+  expand_covering_column(cells, names(cells)[is_cov][1])
+}
+
+#' Replace a data frame's covering column by its stored cells, one row
+#' per cell
+#' @noRd
+expand_covering_column <- function(df, col) {
+  n <- lengths(a5R::a5_covering_stored(df[[col]], simplify = FALSE))
+  out <- df[rep.int(seq_len(nrow(df)), n), , drop = FALSE]
+  out[[col]] <- a5R::a5_covering_stored(df[[col]])
+  rownames(out) <- NULL
+  out
 }

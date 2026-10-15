@@ -584,3 +584,41 @@ test_that("a5_view_pyramid refuses files without an A5 index version", {
   arrow::write_parquet(tbl$ReplaceSchemaMetadata(kv), old)
   expect_error(a5_view_pyramid(old), "Rebuild it")
 })
+
+# A disk compacts to cells at more than one resolution.
+make_covering <- function() {
+  cell <- a5R::a5_lonlat_to_cell(-3.19, 55.95, resolution = 9)
+  a5R::a5_grid_disk(cell, k = 6)
+}
+
+test_that("a5_view draws a covering as its stored cells", {
+  cov <- make_covering()
+  stored <- a5R::a5_covering_stored(cov)
+  expect_gt(length(unique(a5R::a5_get_resolution(stored))), 1L)
+  w <- a5_view(cov)
+  ipc <- base64enc::base64decode(w$x$arrow_ipc)
+  tbl <- arrow::read_ipc_stream(ipc, as_data_frame = FALSE)
+  expect_setequal(format(a5R::a5_cell_from_arrow(tbl$cell)), format(stored))
+  # Hover looks up every resolution present, finest first.
+  res <- sort(unique(a5R::a5_get_resolution(stored)), decreasing = TRUE)
+  expect_equal(unlist(w$x$data_resolution), res)
+})
+
+test_that("a covering column repeats its row per stored cell", {
+  cov <- make_covering()
+  cov2 <- a5R::a5_grid_disk(a5R::a5_lonlat_to_cell(2.35, 48.86, resolution = 9), k = 2)
+  df <- data.frame(id = 1:2)
+  df$area <- c(cov, cov2)
+  out <- covering_to_cells(df)
+  n <- length(a5R::a5_covering_stored(cov))
+  expect_identical(out$id, rep(1:2, c(n, length(a5R::a5_covering_stored(cov2)))))
+  expect_true(a5R::is_a5_cell(out$area))
+  w <- a5_view(df, fill = id)
+  expect_equal(w$x$legend$label, "id")
+})
+
+test_that("pyramids refuse mixed resolutions", {
+  expect_error(a5_view(make_covering(), aggregate = "rep_child"), "one resolution")
+  path <- withr::local_tempfile(fileext = ".parquet")
+  expect_error(a5_build_pyramid(make_covering(), path), "one resolution")
+})

@@ -5,8 +5,13 @@
 #' an opacity slider, a legend for numeric fills, hover tooltips, and
 #' an optional polygon-draw tool.
 #'
-#' @param cells An [a5R::a5_cell] vector, or a data frame / tibble
-#'   containing an `a5_cell` column.
+#' @param cells An [a5R::a5_cell] or [a5R::a5_covering] vector, or a
+#'   data frame / tibble containing a column of either. A covering is
+#'   drawn as the cells it stores, at their mixed resolutions; uncompact
+#'   it with [a5R::a5_uncompact()] first to draw its cells at one
+#'   resolution. Each row of a covering column is repeated once per
+#'   stored cell. Pyramids (`aggregate` other than `"none"`) need cells
+#'   at one resolution.
 #' @param fill Fill colour specification. One of:
 #'   - A single hex colour string (e.g. `"#3388ff"`) for uniform fill.
 #'   - A numeric vector (same length as cells) mapped to `palette`.

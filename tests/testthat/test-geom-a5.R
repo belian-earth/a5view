@@ -199,3 +199,15 @@ test_that("geom_a5 brings a default lon/lat coord_sf, as geom_sf does", {
     expect_identical(sf::st_crs(bq$layout$panel_params[[1]]$crs), sf::st_crs(32736))
   }
 })
+
+test_that("geom_a5 draws a covering as its stored cells", {
+  cell <- a5R::a5_lonlat_to_cell(-3.19, 55.95, resolution = 9)
+  df <- data.frame(id = 1L)
+  df$area <- a5R::a5_grid_disk(cell, k = 6)
+  p <- ggplot2::ggplot(df, ggplot2::aes(cell = area, fill = id)) + geom_a5()
+  d <- ggplot2::layer_data(p)
+  stored <- a5R::a5_covering_stored(df$area)
+  expect_setequal(d$cell, format(stored))
+  expect_true(draw_to_null(p))
+  expect_true(draw_to_null(p + geom_a5(render = "raster")))
+})

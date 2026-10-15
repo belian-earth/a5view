@@ -35,7 +35,9 @@ A5_RASTER_EDGE_PX <- 3
 #' resolution and its cost depends on the number of pixels, not cells.
 #'
 #' @param mapping Aesthetic mappings. `cell` is required: an `a5_cell`
-#'   vector or hex strings. `fill`, `alpha`, `colour`, `linewidth` and
+#'   vector, hex strings, or an [a5R::a5_covering] vector, drawn as the
+#'   cells each covering stores (uncompact it first to draw its cells at
+#'   one resolution). `fill`, `alpha`, `colour`, `linewidth` and
 #'   `linetype` are understood.
 #' @param data,show.legend,inherit.aes,na.rm,... As for other ggplot2
 #'   layers.
@@ -538,6 +540,8 @@ StatA5 <- ggplot2::ggproto(
   # (about 1.5 s per 200k cells, twice), while hex costs 0.07 s to
   # format and 0.01 s to parse back.
   setup_data = function(data, params) {
+    # A covering draws as the cells it stores, its row repeated per cell.
+    if (a5R::is_a5_covering(data$cell)) data <- expand_covering_column(data, "cell")
     if (a5R::is_a5_cell(data$cell)) data$cell <- format(data$cell)
     data$cell <- as.character(data$cell)
     data
@@ -561,3 +565,6 @@ GeomA5 <- ggplot2::ggproto(
 # scale_cell_identity(), find none, and leave it alone without a message.
 #' @exportS3Method ggplot2::scale_type
 scale_type.a5_cell <- function(x) "identity"
+
+#' @exportS3Method ggplot2::scale_type
+scale_type.a5_covering <- function(x) "identity"

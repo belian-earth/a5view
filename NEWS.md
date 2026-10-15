@@ -19,11 +19,17 @@
 * Pyramid files name the cell id column `cell` (was `pentagon`) and
   record the A5 index version as `a5_index = "1.0"` in their parquet
   metadata. `a5_view_pyramid()` refuses files without it.
-* `a5_view()` and `a5_view_update()` refuse an `a5_covering`, as
-  returned by `a5_grid_disk()`, `a5_spherical_cap()` and
-  `a5_polygon_to_cells()` in a5R 1.0, and point to `a5R::a5_uncompact()`.
 
 ## New features
+
+* `a5_view()`, `a5_view_update()`, `a5_build_pyramid()` and `geom_a5()`
+  accept an `a5_covering`, as returned by `a5_grid_disk()`,
+  `a5_spherical_cap()` and `a5_polygon_to_cells()` in a5R 1.0, alone or
+  as a data frame column. It is drawn as the cells it stores, at their
+  mixed resolutions; uncompact it first with `a5R::a5_uncompact()` to
+  draw its cells at one resolution. Widget tooltips find cells at every
+  resolution present. Pyramids still need cells at one resolution and
+  say so.
 
 * New `geom_a5()` draws A5 cells in ggplot2 from a cell column:
   `ggplot(df, aes(cell = cell, fill = value)) + geom_a5()`. It works with

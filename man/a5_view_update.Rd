@@ -21,8 +21,13 @@ a5_view_update(
 
 \item{outputId}{The output ID of the a5_view widget.}
 
-\item{cells}{An \link[a5R:a5_cell]{a5R::a5_cell} vector, or a data frame / tibble
-containing an \code{a5_cell} column.}
+\item{cells}{An \link[a5R:a5_cell]{a5R::a5_cell} or \link[a5R:a5_covering]{a5R::a5_covering} vector, or a
+data frame / tibble containing a column of either. A covering is
+drawn as the cells it stores, at their mixed resolutions; uncompact
+it with \code{\link[a5R:a5_uncompact]{a5R::a5_uncompact()}} first to draw its cells at one
+resolution. Each row of a covering column is repeated once per
+stored cell. Pyramids (\code{aggregate} other than \code{"none"}) need cells
+at one resolution.}
 
 \item{fill}{Fill colour specification. One of:
 \itemize{

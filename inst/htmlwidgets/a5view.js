@@ -260,16 +260,22 @@ HTMLWidgets.widget({
     // the leaf cell up in the Arrow table, the pyramid path looks the
     // cell at the currently rendered LOD up among decoded rows. So
     // hovering empty map gives nothing, and what you hover is what
-    // you see. Returns { cell, hex, row } or null.
+    // you see. In-memory data may mix resolutions (data_resolution
+    // lists them, finest first): the finest cell found wins.
+    // Returns { cell, hex, row } or null.
     function resolveHover(coord) {
       if (!coord || !window.A5 || !lastPayload) return null;
       var x = lastPayload;
-      var res = x.parquet ? lazyRenderer.currentLod() : x.data_resolution;
-      if (res == null) return null;
-      var cell = window.A5.lonLatToCell([coord[0], coord[1]], res);
-      var hex = pentToHex(cell);
-      var row = x.parquet ? lazyRenderer.findRow(res, hex) : findLegacyRow(hex);
-      return row ? { cell: cell, hex: hex, row: row } : null;
+      var resList = x.parquet ? [lazyRenderer.currentLod()] : [].concat(x.data_resolution);
+      for (var i = 0; i < resList.length; i++) {
+        var res = resList[i];
+        if (res == null) continue;
+        var cell = window.A5.lonLatToCell([coord[0], coord[1]], res);
+        var hex = pentToHex(cell);
+        var row = x.parquet ? lazyRenderer.findRow(res, hex) : findLegacyRow(hex);
+        if (row) return { cell: cell, hex: hex, row: row };
+      }
+      return null;
     }
 
     function fmtNumber(v) {

@@ -163,8 +163,8 @@ test_that("check_bool rejects non-bool", {
   expect_error(check_bool(c(TRUE, FALSE), "x"), "TRUE.*FALSE")
 })
 
-test_that("check_cells rejects a covering and points to a5_uncompact()", {
+test_that("check_cells accepts a covering", {
   cell <- a5R::a5_lonlat_to_cell(0, 0, resolution = 5)
   disk <- a5R::a5_grid_disk(cell, k = 1)
-  expect_error(check_cells(disk), "a5_uncompact")
+  expect_no_error(check_cells(disk))
 })
