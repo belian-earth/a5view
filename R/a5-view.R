@@ -5,8 +5,13 @@
 #' an opacity slider, a legend for numeric fills, hover tooltips, and
 #' an optional polygon-draw tool.
 #'
-#' @param cells An [a5R::a5_cell] vector, or a data frame / tibble
-#'   containing an `a5_cell` column.
+#' @param cells An [a5R::a5_cell] or [a5R::a5_covering] vector, or a
+#'   data frame / tibble containing a column of either. A covering is
+#'   drawn as the cells it stores, at their mixed resolutions; uncompact
+#'   it with [a5R::a5_uncompact()] first to draw its cells at one
+#'   resolution. Each row of a covering column is repeated once per
+#'   stored cell. Pyramids (`aggregate` other than `"none"`) need cells
+#'   at one resolution.
 #' @param fill Fill colour specification. One of:
 #'   - A single hex colour string (e.g. `"#3388ff"`) for uniform fill.
 #'   - A numeric vector (same length as cells) mapped to `palette`.
@@ -68,7 +73,11 @@
 #'   itself does not visualise which cells fall inside the polygon:
 #'   resolve the WKT server-side (e.g. with
 #'   [a5R::a5_polygon_to_cells()]) and update the map fills via
-#'   [a5_view_update()]. Only useful in a Shiny context.
+#'   [a5_view_update()]. The outline is drawn with straight edges on the
+#'   Web Mercator map, but [a5R::a5_polygon_to_cells()] reads edges as
+#'   great circles, so along a long edge the selected cells can stray
+#'   from the outline; place more vertices to keep them close. Only
+#'   useful in a Shiny context.
 #'   Default: `FALSE`.
 #' @param aggregate How parent cells are summarised when zooming out.
 #'   One of:

@@ -7,7 +7,7 @@ find_cell_column <- function(df) {
     if (a5R::is_a5_cell(df[[nm]])) return(nm)
   }
   cli::cli_abort(
-    "No {.cls a5_cell} column found in {.arg cells}. Columns present: {.val {names(df)}}."
+    "No {.cls a5_cell} or {.cls a5_covering} column found in {.arg cells}. Columns present: {.val {names(df)}}."
   )
 }
 
@@ -74,7 +74,8 @@ prepare_data <- function(cells) {
 #' @param leaf_cells `a5_cell` vector at the data resolution.
 #' @param df Data frame with a `cell` column plus optional
 #'   `_fill_r/g/b/a`, `_fill_value`, `_elevation` columns.
-#' @param data_resolution Integer A5 resolution of `leaf_cells`.
+#' @param data_resolution Integer A5 resolution of `leaf_cells`: one
+#'   only, as each LOD aggregates a single leaf resolution.
 #' @param lod_step Integer >= 1, gap between successive LODs.
 #' @param aggregate One of `"rep_child"`, `"mean"`.
 #' @param min_lod Lowest LOD to precompute (default 2).
@@ -84,6 +85,12 @@ prepare_data <- function(cells) {
 #' @noRd
 build_a5_pyramid <- function(leaf_cells, df, data_resolution, lod_step,
                              aggregate, min_lod = 2L) {
+  if (length(data_resolution) > 1L) {
+    cli::cli_abort(c(
+      "A pyramid needs cells at one resolution, not {sort(data_resolution)}.",
+      "i" = "Draw mixed resolutions with {.code aggregate = \"none\"} in {.fn a5_view}."
+    ))
+  }
   data_resolution <- as.integer(data_resolution)
   lod_step <- as.integer(lod_step)
   min_lod <- as.integer(min_lod)
@@ -272,7 +279,7 @@ serialise_pyramid_to_parquet <- function(pdf, path,
     lat <- xy$y[sl]
     lon_rng <- range(lon)
     lat_rng <- range(lat)
-    pad_lat <- as.numeric(edge_m[k]) / 111320
+    pad_lat <- as.numeric(edge_m[k]) / 111195
     pad_lon <- pad_lat / max(cos(max(abs(lat_rng)) * pi / 180), 0.05)
     west <- lon_rng[1] - pad_lon
     east <- lon_rng[2] + pad_lon
@@ -293,7 +300,8 @@ serialise_pyramid_to_parquet <- function(pdf, path,
   }
 
   schema_kv <- list(
-    a5view_row_groups = yyjsonr::write_json_str(rg_index, auto_unbox = TRUE)
+    a5view_row_groups = yyjsonr::write_json_str(rg_index, auto_unbox = TRUE),
+    a5_index = A5_INDEX_VERSION
   )
   if (!is.null(meta) && length(meta) > 0L) {
     schema_kv$a5view_meta <- yyjsonr::write_json_str(meta, auto_unbox = TRUE)
@@ -325,16 +333,25 @@ serialise_pyramid_to_parquet <- function(pdf, path,
   invisible(list(n_row_groups = length(plan_indices), path = path))
 }
 
+# The A5 index version of the cell ids a pyramid file holds, recorded
+# under the `a5_index` KV key. A5 1.0 renumbered every cell, and an id
+# does not say which version wrote it.
+A5_INDEX_VERSION <- "1.0"
+
 #' Read the embedded `a5view_meta` KV entry from a pyramid parquet file
 #'
-#' Returns the parsed JSON object, or `NULL` if the entry is missing.
+#' Returns the parsed JSON object with the file's `a5_index` KV entry
+#' as its `a5_index` element (`NULL` when absent), or `NULL` if the
+#' `a5view_meta` entry is missing.
 #' @noRd
 read_pyramid_meta <- function(path) {
   reader <- arrow::ParquetFileReader$create(path)
   kv <- reader$GetSchema()$metadata
   json <- kv[["a5view_meta"]]
   if (is.null(json)) return(NULL)
-  yyjsonr::read_json_str(json)
+  meta <- yyjsonr::read_json_str(json)
+  meta$a5_index <- kv[["a5_index"]]
+  meta
 }
 
 #' Resolve elevation column name from NSE expression
@@ -415,10 +432,12 @@ guess_zoom <- function(xy) {
 #' @param elev_expr Substituted `elevation` argument.
 #' @return `NULL` when no non-NA cells remain, else a list with `df`,
 #'   `leaf_cells`, `extra`, `fill_color`, `legend`, `has_fill_value`,
-#'   `has_rgba_cols`, `extruded` and `data_resolution`.
+#'   `has_rgba_cols`, `extruded` and `data_resolution` (the
+#'   resolutions present, finest first).
 #' @noRd
 prepare_view_data <- function(cells, fill_quo, fill_identity, palette,
                               elev_expr = NULL) {
+  cells <- covering_to_cells(cells)
   n_cells <- if (a5R::is_a5_cell(cells)) length(cells) else nrow(cells)
   fill_resolved <- resolve_fill(cells, fill_quo, n_cells)
 
@@ -469,7 +488,10 @@ prepare_view_data <- function(cells, fill_quo, fill_identity, palette,
     has_fill_value = "_fill_value" %in% names(df),
     has_rgba_cols = "_fill_r" %in% names(df),
     extruded = extruded,
-    data_resolution = as.integer(a5R::a5_get_resolution(prepared$a5_cells[[1]]))
+    data_resolution = sort(
+      unique(as.integer(a5R::a5_get_resolution(prepared$a5_cells))),
+      decreasing = TRUE
+    )
   )
 }
 
@@ -487,6 +509,12 @@ resolve_tooltip_cols <- function(tooltip, prep, aggregate = "none") {
     cli::cli_abort(c(
       "{.arg tooltip} column{?s} not found: {.val {bad}}.",
       "i" = "Available columns: {.val {avail}}."
+    ))
+  }
+  if ("cell" %in% tooltip) {
+    cli::cli_abort(c(
+      "{.arg tooltip} cannot show a column named {.val cell}.",
+      "i" = "The cell id travels to the browser as {.val cell}, and the tooltip always shows it. Rename the column."
     ))
   }
   non_atomic <- tooltip[!vapply(prep$extra[tooltip], is.atomic, logical(1))]
@@ -508,14 +536,14 @@ resolve_tooltip_cols <- function(tooltip, prep, aggregate = "none") {
 #' Build the Arrow table shipped to the browser
 #'
 #' One place defines the wire schema for both the inline IPC path and
-#' the parquet pyramid path: `pentagon` (fixed-width hex via
+#' the parquet pyramid path: `cell` (fixed-width hex via
 #' `a5R::a5_cell_to_arrow` on the `cell` column), optional `_lod`, `_fill_value`,
 #' `_fill_r/g/b/a`, `_elevation`, followed by any extra tooltip columns.
 #' @noRd
 payload_arrow_table <- function(pdf, has_lod, has_fill_value,
                                 has_rgba_cols, extruded, extra = list()) {
   u8 <- function(x) arrow::Array$create(x, type = arrow::uint8())
-  cols <- list(pentagon = a5R::a5_cell_to_arrow(pdf[["cell"]]))
+  cols <- list(cell = a5R::a5_cell_to_arrow(pdf[["cell"]]))
   if (has_lod) cols[["_lod"]] <- u8(pdf[["_lod"]])
   if (has_fill_value) {
     # float32 is plenty for a tooltip readout and halves the column.
@@ -584,4 +612,32 @@ encode_view_data <- function(prep, aggregate, lod_step,
     parquet_payload(path, session = session, temp = TRUE),
     list(lod_resolutions = as.list(as.integer(pyramid$lod_resolutions)))
   )
+}
+
+#' Turn `a5_covering` input into cells
+#'
+#' A covering is drawn as the cells it stores, at their mixed
+#' resolutions; uncompacting is the caller's choice. A data frame column
+#' of coverings is used when the frame has no `a5_cell` column, and each
+#' row is repeated once per stored cell so its other columns travel with
+#' them. Anything else is returned unchanged.
+#' @noRd
+covering_to_cells <- function(cells) {
+  if (a5R::is_a5_covering(cells)) return(a5R::a5_covering_stored(cells))
+  if (!is.data.frame(cells)) return(cells)
+  if (any(vapply(cells, a5R::is_a5_cell, logical(1)))) return(cells)
+  is_cov <- vapply(cells, a5R::is_a5_covering, logical(1))
+  if (!any(is_cov)) return(cells)
+  expand_covering_column(cells, names(cells)[is_cov][1])
+}
+
+#' Replace a data frame's covering column by its stored cells, one row
+#' per cell
+#' @noRd
+expand_covering_column <- function(df, col) {
+  n <- lengths(a5R::a5_covering_stored(df[[col]], simplify = FALSE))
+  out <- df[rep.int(seq_len(nrow(df)), n), , drop = FALSE]
+  out[[col]] <- a5R::a5_covering_stored(df[[col]])
+  rownames(out) <- NULL
+  out
 }

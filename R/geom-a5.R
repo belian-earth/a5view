@@ -35,7 +35,9 @@ A5_RASTER_EDGE_PX <- 3
 #' resolution and its cost depends on the number of pixels, not cells.
 #'
 #' @param mapping Aesthetic mappings. `cell` is required: an `a5_cell`
-#'   vector or hex strings. `fill`, `alpha`, `colour`, `linewidth` and
+#'   vector, hex strings, or an [a5R::a5_covering] vector, drawn as the
+#'   cells each covering stores (uncompact it first to draw its cells at
+#'   one resolution). `fill`, `alpha`, `colour`, `linewidth` and
 #'   `linetype` are understood.
 #' @param data,show.legend,inherit.aes,na.rm,... As for other ggplot2
 #'   layers.
@@ -147,7 +149,7 @@ a5_cell_extent <- function(cells) {
   res <- a5R::a5_get_resolution(cells)
   xy <- unclass(a5R::a5_cell_to_lonlat(cells))
   edge_m <- as.numeric(a5R::a5_cell_edge_length_avg(res))
-  pad_lat <- edge_m / 111320
+  pad_lat <- edge_m / 111195 # metres per degree of latitude, authalic sphere
   pad_lon <- pad_lat / pmax(cos(xy$y * pi / 180), 0.05)
   out <- list(
     lon = xy$x, lat = xy$y,
@@ -166,13 +168,15 @@ a5_cell_extent <- function(cells) {
   out
 }
 
+# A lon/lat box as an n x n grid of points, to project for its extent.
+# The whole grid, not just the outline: in a polar projection the edges
+# of a box spanning all longitudes are two coincident meridians and the
+# pole, and the extent comes from its interior.
 densified_box <- function(xmin, xmax, ymin, ymax, n = 21L) {
   s <- seq(0, 1, length.out = n)
-  xs <- xmin + s * (xmax - xmin)
-  ys <- ymin + s * (ymax - ymin)
   list(
-    x = c(xs, rep(xmax, n), rev(xs), rep(xmin, n)),
-    y = c(rep(ymin, n), ys, rep(ymax, n), rev(ys))
+    x = rep(xmin + s * (xmax - xmin), times = n),
+    y = rep(ymin + s * (ymax - ymin), each = n)
   )
 }
 
@@ -217,7 +221,62 @@ a5_rings <- function(cells) {
   drop <- rings$lengths == 0L
   rings$lengths <- rings$lengths[!drop]
   rings$cell <- rings$cell[!drop]
-  split_antimeridian(rings)
+  split_antimeridian(close_poles(rings))
+}
+
+# A pole is a point on the sphere but the line y = +/-90 in lon/lat, and
+# A5 rings do not trace that line. A cell with a vertex on a pole gives
+# the vertex one arbitrary longitude; a cell with a pole inside gives a
+# ring that winds once around it, so filling the ring as it stands
+# leaves the cap beyond its northern- or southernmost vertex empty. Both
+# are closed along the pole line: a pole vertex becomes two, at its
+# neighbours' longitudes, and a winding ring is unwrapped to span 360
+# degrees and joined to the pole at both ends.
+close_poles <- function(rings) {
+  n <- length(rings$x)
+  if (n == 0L) return(rings)
+  end <- cumsum(rings$lengths)
+  start <- end - rings$lengths + 1L
+  ring_id <- rep.int(seq_along(rings$lengths), rings$lengths)
+  nxt <- seq_len(n) + 1L
+  nxt[end] <- start
+  pole <- abs(rings$y) >= 90 - 1e-9
+  d <- (rings$x[nxt] - rings$x + 180) %% 360 - 180
+  winding <- as.vector(rowsum(d, ring_id))
+  fix <- sort(union(unique(ring_id[pole]), which(abs(winding) > 180)))
+  if (length(fix) == 0L) return(rings)
+
+  pieces <- lapply(fix, function(i) {
+    idx <- start[i]:end[i]
+    x <- rings$x[idx]
+    y <- rings$y[idx]
+    p <- pole[idx]
+    if (any(p)) {
+      m <- length(x)
+      prv <- c(m, seq_len(m - 1L))
+      nx <- c(seq_len(m - 1L) + 1L, 1L)
+      k <- rep.int(seq_len(m), ifelse(p, 2L, 1L))
+      first <- !duplicated(k)
+      x <- ifelse(p[k], ifelse(first, x[prv[k]], x[nx[k]]), x[k])
+      y <- y[k]
+      return(list(x = x, y = y))
+    }
+    xu <- (x[1L] + 180) %% 360 - 180 + cumsum(c(0, (diff(x) + 180) %% 360 - 180))
+    w <- winding[i]
+    py <- if (mean(y) > 0) 90 else -90
+    list(
+      x = c(xu, xu[1L] + w, xu[1L] + w, xu[1L]),
+      y = c(y, y[1L], py, py)
+    )
+  })
+  keep <- !(ring_id %in% fix)
+  kept <- setdiff(seq_along(rings$lengths), fix)
+  list(
+    x = c(rings$x[keep], unlist(lapply(pieces, `[[`, "x"))),
+    y = c(rings$y[keep], unlist(lapply(pieces, `[[`, "y"))),
+    lengths = c(rings$lengths[kept], vapply(pieces, function(p) length(p$x), integer(1))),
+    cell = c(rings$cell[kept], rings$cell[fix])
+  )
 }
 
 # A5 rings keep longitudes continuous around the cell centre, so a cell
@@ -481,6 +540,8 @@ StatA5 <- ggplot2::ggproto(
   # (about 1.5 s per 200k cells, twice), while hex costs 0.07 s to
   # format and 0.01 s to parse back.
   setup_data = function(data, params) {
+    # A covering draws as the cells it stores, its row repeated per cell.
+    if (a5R::is_a5_covering(data$cell)) data <- expand_covering_column(data, "cell")
     if (a5R::is_a5_cell(data$cell)) data$cell <- format(data$cell)
     data$cell <- as.character(data$cell)
     data
@@ -504,3 +565,6 @@ GeomA5 <- ggplot2::ggproto(
 # scale_cell_identity(), find none, and leave it alone without a message.
 #' @exportS3Method ggplot2::scale_type
 scale_type.a5_cell <- function(x) "identity"
+
+#' @exportS3Method ggplot2::scale_type
+scale_type.a5_covering <- function(x) "identity"

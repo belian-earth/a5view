@@ -28,8 +28,13 @@ a5_view(
 )
 }
 \arguments{
-\item{cells}{An \link[a5R:a5_cell]{a5R::a5_cell} vector, or a data frame / tibble
-containing an \code{a5_cell} column.}
+\item{cells}{An \link[a5R:a5_cell]{a5R::a5_cell} or \link[a5R:a5_covering]{a5R::a5_covering} vector, or a
+data frame / tibble containing a column of either. A covering is
+drawn as the cells it stores, at their mixed resolutions; uncompact
+it with \code{\link[a5R:a5_uncompact]{a5R::a5_uncompact()}} first to draw its cells at one
+resolution. Each row of a covering column is repeated once per
+stored cell. Pyramids (\code{aggregate} other than \code{"none"}) need cells
+at one resolution.}
 
 \item{fill}{Fill colour specification. One of:
 \itemize{
@@ -107,7 +112,11 @@ suppressed and cell-pick click events do not fire. The widget
 itself does not visualise which cells fall inside the polygon:
 resolve the WKT server-side (e.g. with
 \code{\link[a5R:a5_polygon_to_cells]{a5R::a5_polygon_to_cells()}}) and update the map fills via
-\code{\link[=a5_view_update]{a5_view_update()}}. Only useful in a Shiny context.
+\code{\link[=a5_view_update]{a5_view_update()}}. The outline is drawn with straight edges on the
+Web Mercator map, but \code{\link[a5R:a5_polygon_to_cells]{a5R::a5_polygon_to_cells()}} reads edges as
+great circles, so along a long edge the selected cells can stray
+from the outline; place more vertices to keep them close. Only
+useful in a Shiny context.
 Default: \code{FALSE}.}
 
 \item{aggregate}{How parent cells are summarised when zooming out.

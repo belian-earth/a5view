@@ -17,7 +17,9 @@ geom_a5(
 }
 \arguments{
 \item{mapping}{Aesthetic mappings. \code{cell} is required: an \code{a5_cell}
-vector or hex strings. \code{fill}, \code{alpha}, \code{colour}, \code{linewidth} and
+vector, hex strings, or an \link[a5R:a5_covering]{a5R::a5_covering} vector, drawn as the
+cells each covering stores (uncompact it first to draw its cells at
+one resolution). \code{fill}, \code{alpha}, \code{colour}, \code{linewidth} and
 \code{linetype} are understood.}
 
 \item{data, show.legend, inherit.aes, na.rm, ...}{As for other ggplot2

@@ -13,3 +13,4 @@
 ^docs$
 ^pkgdown$
 ^inst/hex/a5viewhex\.R$
+^vignettes/articles$
