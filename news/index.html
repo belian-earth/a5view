@@ -55,7 +55,7 @@
 </ul></div>
 <div class="section level3">
 <h3 id="internals-0-3-0">Internals<a class="anchor" aria-label="anchor" href="#internals-0-3-0"></a></h3>
-<ul><li>Vendored a5-js is 1.0.0-beta.2 (<code>inst/htmlwidgets/lib/a5-js/a5.js</code>). The version is set once, in <code>bridge.js</code>, which also feeds the CDN fallback used by self-contained HTML and the pyramid tile worker.</li>
+<ul><li>Vendored a5-js is 1.0.0-beta.3 (<code>inst/htmlwidgets/lib/a5-js/a5.js</code>). The version is set once, in <code>bridge.js</code>, which also feeds the CDN fallback used by self-contained HTML and the pyramid tile worker.</li>
 <li>deck.gl 9.4 bundles a5-js 0.10 inside its <code>A5Layer</code>. Cells and the hover highlight now draw through a small subclass (<code>lib/a5view-tiling/a5-layer.js</code>) that takes boundaries from the vendored a5-js 1.0. It can be dropped once deck.gl moves to a5-js 1.0.</li>
 <li>New tests check the vendored a5-js against a5R: <code>cellToBoundary()</code> and <code>lonLatToCell()</code> agree with <code>a5_cell_to_boundary()</code> and <code>a5_lonlat_to_cell()</code> at resolutions 0 to 18.</li>
 <li>
