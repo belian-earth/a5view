@@ -216,7 +216,7 @@ unproject_to_lonlat <- function(xy, crs) {
 # where `cell` indexes the input. Missing cells give no ring; a cell
 # crossing the antimeridian gives two (see split_antimeridian()).
 a5_rings <- function(cells) {
-  xy <- a5R::a5_cell_to_boundary_xy(cells, closed = FALSE)
+  xy <- a5R::a5_cell_to_boundary_xy(cells)
   rings <- list(x = xy$x, y = xy$y, lengths = xy$lengths, cell = seq_along(cells))
   drop <- rings$lengths == 0L
   rings$lengths <- rings$lengths[!drop]
