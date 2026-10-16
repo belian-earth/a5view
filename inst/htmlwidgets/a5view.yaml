@@ -13,10 +13,11 @@ dependencies:
       href: https://unpkg.com/deck.gl@9.4.0
     script:
       - dist.min.js
-  # a5-js 1.0.0-beta.3, written 1.0.0-3 because htmltools only takes
-  # numeric versions. The version is set in lib/a5-js/bridge.js.
+  # a5-js 1.0.0. htmltools only takes numeric versions, so a
+  # prerelease such as 1.0.0-beta.3 is written 1.0.0-3. The version is
+  # set in lib/a5-js/bridge.js.
   - name: a5-js
-    version: 1.0.0-3
+    version: 1.0.0
     src:
       file: htmlwidgets/lib/a5-js
     script:

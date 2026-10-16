@@ -2018,14 +2018,13 @@ function normalizeRes30(index) {
   return res30ToSlot(index) & ~3n | 0b10n;
 }
 function cellToParent(index, parentResolution) {
+  const check = parentResolution !== void 0;
   if (parentResolution === void 0) parentResolution = getResolution(index) - 1;
   if (parentResolution === -1) return WORLD_CELL;
   if (parentResolution < -1 || parentResolution > MAX_RESOLUTION) {
     throw new Error(`Target resolution (${parentResolution}) is out of range`);
   }
-  if (index === WORLD_CELL) {
-    throw new Error(`Target resolution (${parentResolution}) must be equal to or less than current resolution (-1)`);
-  }
+  if (index === WORLD_CELL) finerTarget(index, parentResolution);
   let c2 = index;
   if (isMaxResolution(index)) {
     if (parentResolution === MAX_RESOLUTION) return index;
@@ -2034,13 +2033,22 @@ function cellToParent(index, parentResolution) {
   }
   if (parentResolution >= FIRST_CURVE_RESOLUTION) {
     const keepShift = BigInt(60 - 2 * parentResolution);
-    return c2 >> keepShift << keepShift | 1n << BigInt(59 - 2 * parentResolution);
+    const kept = c2 >> keepShift << keepShift;
+    if (check && kept === c2) finerTarget(index, parentResolution);
+    return kept | 1n << BigInt(59 - 2 * parentResolution);
   }
+  const isRes0 = (c2 & (1n << 57n) - 1n) === 0n;
   if (parentResolution === 1) {
+    if (isRes0) finerTarget(index, parentResolution);
     return c2 >> 58n << 58n | 1n << 56n;
   }
-  if ((c2 & (1n << 57n) - 1n) === 0n) return c2;
+  if (isRes0) return c2;
   return (c2 >> 58n) / 5n << 58n | 1n << 57n;
+}
+function finerTarget(index, parentResolution) {
+  throw new Error(
+    `Target resolution (${parentResolution}) must be equal to or less than current resolution (${getResolution(index)})`
+  );
 }
 var RES0_CELLS;
 function getRes0Cells() {
@@ -2109,6 +2117,7 @@ function lastCellShape(cellId) {
 function lonLatToCell(lonLat, resolution) {
   return sphericalToCell(fromLonLat(lonLat), resolution);
 }
+var FACE_INRADIUS_HAVERSINE = 0.07467459582398002;
 var _scaledPoint = create2();
 function sphericalToCell(spherical, resolution) {
   if (resolution === -1) {
@@ -2121,14 +2130,20 @@ function sphericalToCell(spherical, resolution) {
     const { segment } = quintantToSegment(quintant2, origin2);
     return serialize({ S: 0n, segment, origin: origin2, resolution });
   }
+  let nearestOrigin = null;
   if (_lastResult && _lastResult.resolution === resolution) {
-    const projected = dodecahedron.forward(spherical, _lastResult.originId);
-    _lastPoint = spherical;
-    _lastPointOrigin = _lastResult.originId;
-    _lastPointFace = projected;
-    if (_lastResult.pentagon.containsPoint(projected) > 0) return _lastResult.cellId;
+    if (haversine(spherical, origins[_lastResult.originId].axis) >= FACE_INRADIUS_HAVERSINE) {
+      nearestOrigin = findNearestOrigin(spherical);
+    }
+    if (nearestOrigin === null || nearestOrigin.id === _lastResult.originId) {
+      const projected = dodecahedron.forward(spherical, _lastResult.originId);
+      _lastPoint = spherical;
+      _lastPointOrigin = _lastResult.originId;
+      _lastPointFace = projected;
+      if (_lastResult.pentagon.containsPoint(projected) > 0) return _lastResult.cellId;
+    }
   }
-  const origin = findNearestOrigin(spherical);
+  const origin = nearestOrigin ?? findNearestOrigin(spherical);
   const dodecPoint = dodecahedron.forward(spherical, origin.id);
   _lastPoint = spherical;
   _lastPointOrigin = origin.id;
@@ -2778,7 +2793,7 @@ function cellToSupercell(cell, resolution) {
   if (resolution === cellResolution) return cell;
   return cellCenterToCell(cell, resolution);
 }
-function cellToSubcell(cell, resolution) {
+function cellToSubcells(cell, resolution) {
   const cellResolution = getResolution(cell);
   if (resolution < cellResolution) {
     throw new Error(
@@ -3490,7 +3505,7 @@ function pointInPreparedPolygon(p, prep) {
 }
 
 // modules/regions/polygon-boundary.ts
-function sampleBoundary(rings, resolution, exact) {
+function sampleBoundary(rings, resolution) {
   const cells = [];
   const set3 = /* @__PURE__ */ new Set();
   const segmentMap = /* @__PURE__ */ new Map();
@@ -3508,7 +3523,7 @@ function sampleBoundary(rings, resolution, exact) {
   };
   let segOffset = 0;
   for (let r = 0; r < rings.length; r++) {
-    tracePath(rings[r], true, resolution, (cell, arc) => recordCell(cell, segOffset + arc), exact);
+    tracePath(rings[r], true, resolution, (cell, arc) => recordCell(cell, segOffset + arc), true);
     segOffset += rings[r].length;
   }
   return { cells, set: set3, segmentMap };
@@ -3849,7 +3864,7 @@ function polygonToCells(polygon, resolution, { containment = "center" } = {}) {
   }
   const prep = preparePolygon(ringVecsList);
   const overlapping = containment === "overlapping";
-  const sampled = sampleBoundary(rings, resolution, overlapping);
+  const sampled = sampleBoundary(rings, resolution);
   if (resolution === MAX_RESOLUTION && sampled.cells.some((cell) => getResolution(cell) !== resolution)) {
     return polygonToCells(polygon, resolution - 1, { containment });
   }
@@ -3878,7 +3893,7 @@ export {
   cellToChildren,
   cellToLonLat,
   cellToParent,
-  cellToSubcell,
+  cellToSubcells,
   cellToSupercell,
   compact,
   contains,
