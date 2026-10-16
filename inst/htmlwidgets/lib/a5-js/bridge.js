@@ -15,7 +15,7 @@
 // included (see lib/a5view-tiling/a5-layer.js).
 (function () {
   if (window.A5Ready) return;
-  var A5_JS_VERSION = "1.0.0-beta.3";
+  var A5_JS_VERSION = "1.0.0";
   var here = document.currentScript;
   var baseUrl = (here && here.src) ? here.src.replace(/[^/]+$/, "") : "";
   var local = baseUrl ? baseUrl + "a5.js" : null;

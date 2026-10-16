@@ -69,7 +69,7 @@
 
 ## Internals
 
-* Vendored a5-js is 1.0.0-beta.3 (`inst/htmlwidgets/lib/a5-js/a5.js`). The
+* Vendored a5-js is 1.0.0 (`inst/htmlwidgets/lib/a5-js/a5.js`). The
   version is set once, in `bridge.js`, which also feeds the CDN fallback
   used by self-contained HTML and the pyramid tile worker.
 * deck.gl 9.4 bundles a5-js 0.10 inside its `A5Layer`. Cells and the
