@@ -3,7 +3,7 @@ library(a5R)
 devtools::load_all()
 # library(a5view)
 
-a5_set_threads(6)
+a5_threads(6)
 
 resolution <- 8
 

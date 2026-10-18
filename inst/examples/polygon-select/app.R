@@ -2,7 +2,7 @@ library(shiny)
 library(a5R)
 library(a5view)
 
-a5_set_threads(4)
+a5_threads(4)
 
 resolution <- 4L
 

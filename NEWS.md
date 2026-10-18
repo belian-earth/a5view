@@ -1,3 +1,11 @@
+# a5view (development version)
+
+* `geom_a5()` no longer warns "`closed` was renamed `closed_ring`" with
+  a5R 1.0.0: it relies on `a5_cell_to_boundary_xy()`'s open-ring default
+  instead of naming the argument.
+* The example apps use `a5R::a5_threads()`, which replaces
+  `a5_set_threads()` in a5R 0.9.9.9006.
+
 # a5view 0.3.0
 
 ## Breaking changes
