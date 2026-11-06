@@ -94,6 +94,11 @@ print.a5_rgb <- function(x, ...) {
   invisible(x)
 }
 
+# a5_rgb extends these vctrs generics, which ggplot2 calls; importing them
+# loads vctrs with a5view, so the methods below are always registered.
+#' @importFrom vctrs vec_cast vec_ptype2 vec_restore
+NULL
+
 #' @exportS3Method vctrs::vec_restore
 vec_restore.a5_rgb <- function(x, to, ...) new_a5_rgb(x)
 

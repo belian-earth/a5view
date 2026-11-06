@@ -6,6 +6,15 @@
 #' [a5_view_pyramid()] without rebuilding, which is useful for large
 #' datasets where the pyramid takes time to compute.
 #'
+#' The pyramid is built and written by [a5pyramid::a5_write_pyramid()], in
+#' parallel on [a5pyramid::a5pyramid_threads()] threads, so the file is an
+#' a5pyramid file: [a5pyramid::a5_pyramid_info()] and
+#' [a5pyramid::a5_read_pyramid()] read it, and any renderer that reads the
+#' a5pyramid format can draw it. The payload columns are `_fill_r`,
+#' `_fill_g`, `_fill_b` and `_fill_a` (`uint8`) when `fill` gives per-cell
+#' colours, `_fill_value` (`float32`) when it maps values, and
+#' `_elevation`.
+#'
 #' Colours are baked into the parquet (as `_fill_r/g/b/a` columns when
 #' `fill` produces per-cell colours, or as a single uniform colour
 #' stored in the file's KV metadata otherwise). One file therefore
@@ -56,20 +65,11 @@ a5_build_pyramid <- function(
     cli::cli_abort("No non-NA cells to display.")
   }
 
-  pyramid <- build_a5_pyramid(
-    leaf_cells = prep$leaf_cells,
-    df = prep$df,
-    data_resolution = prep$data_resolution,
-    lod_step = lod_step,
-    aggregate = aggregate
-  )
-
   legend <- prep$legend
   if (!is.null(legend)) legend$label <- rlang::as_label(fill_quo)
 
   meta <- list(
     data_resolution = prep$data_resolution,
-    lod_resolutions = as.list(as.integer(pyramid$lod_resolutions)),
     has_fill_value = prep$has_fill_value,
     fill_per_cell = prep$has_rgba_cols,
     extruded = prep$extruded,
@@ -77,14 +77,7 @@ a5_build_pyramid <- function(
     legend = legend,
     view_state = auto_view(prep$leaf_cells, lng, lat, zoom)
   )
-
-  serialise_pyramid_to_parquet(
-    pyramid$data, path,
-    has_fill_value = prep$has_fill_value,
-    has_rgba_cols = prep$has_rgba_cols,
-    extruded = prep$extruded,
-    meta = meta
-  )
+  write_pyramid(prep, path, aggregate, lod_step, meta = meta)
 
   invisible(path)
 }
@@ -141,8 +134,8 @@ a5_view_pyramid <- function(
   meta <- read_pyramid_meta(path)
   if (is.null(meta)) {
     cli::cli_abort(c(
-      "{.arg path} does not look like an a5view pyramid file.",
-      i = "Expected an {.code a5view_meta} KV entry written by {.fn a5_build_pyramid}."
+      "{.arg path} is not a pyramid file written by {.fn a5_build_pyramid}.",
+      i = "Pyramids from a5view 0.3 and earlier use an older layout. Rebuild it with {.fn a5_build_pyramid}."
     ))
   }
   if (!identical(meta$a5_index, A5_INDEX_VERSION)) {

@@ -136,7 +136,9 @@ level-of-detail pyramid: coarser cells summarise their children
 (`"mean"` for scalar fields, `"rep_child"` to keep one representative
 child for colour composites), and the browser decodes only the levels
 and areas in view. `a5_build_pyramid()` writes the pyramid to a parquet
-file once, so it can be viewed again without rebuilding.
+file once, so it can be viewed again without rebuilding. Pyramids are
+built in parallel by [a5pyramid](https://github.com/belian-earth/a5pyramid),
+in its parquet format, which any a5pyramid reader can open.
 
 ``` r
 a5_view(cells, fill = value, aggregate = "mean")

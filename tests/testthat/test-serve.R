@@ -117,11 +117,11 @@ test_that("parquet_payload falls back to inline for sessions without registerDat
 # --- integration through the exported functions ---
 
 test_that("a5_view_update serves the pyramid by URL when the session can", {
-  cells <- a5R::a5_lonlat_to_cell(seq(-1, 1, length.out = 20), seq(-1, 1, length.out = 20), resolution = 6)
+  cells <- unique(a5R::a5_lonlat_to_cell(seq(-1, 1, length.out = 20), seq(-1, 1, length.out = 20), resolution = 6))
   captured <- NULL
   s <- mock_session()
   s$sendCustomMessage <- function(type, message) captured <<- message
-  a5_view_update(s, "map", cells, fill = seq_len(20), aggregate = "rep_child")
+  a5_view_update(s, "map", cells, fill = seq_along(cells), aggregate = "rep_child")
   expect_match(captured$parquet$url, "dataobj")
   expect_true(captured$parquet$bytes > 0)
   expect_null(captured$arrow_ipc)
@@ -129,7 +129,7 @@ test_that("a5_view_update serves the pyramid by URL when the session can", {
 })
 
 test_that("a5_view inlines the pyramid outside Shiny", {
-  cells <- a5R::a5_lonlat_to_cell(seq(-1, 1, length.out = 20), seq(-1, 1, length.out = 20), resolution = 6)
+  cells <- unique(a5R::a5_lonlat_to_cell(seq(-1, 1, length.out = 20), seq(-1, 1, length.out = 20), resolution = 6))
   w <- a5_view(cells, aggregate = "mean")
   expect_true(nzchar(w$x$parquet$b64))
   expect_null(w$x$parquet$url)

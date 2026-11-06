@@ -11,17 +11,9 @@ make_cells <- function(n = 3, res = 5) {
   a5R::a5_lonlat_to_cell(lons, lats, resolution = res)
 }
 
-# Decode the base64 Arrow IPC payload and slice to leaf-LOD rows. The
-# pyramid build stacks leaves first (in original order) followed by
-# parent-LOD rows; tests that compare against the original `cells`
-# input only care about the leaf level.
+# Decode the base64 Arrow IPC payload of `aggregate = "none"`.
 decode_leaf_tbl <- function(b64) {
-  tbl <- arrow::read_ipc_stream(base64enc::base64decode(b64))
-  if ("_lod" %in% names(tbl)) {
-    leaf_lod <- max(as.integer(tbl[["_lod"]]))
-    tbl <- tbl[as.integer(tbl[["_lod"]]) == leaf_lod, ]
-  }
-  tbl
+  arrow::read_ipc_stream(base64enc::base64decode(b64))
 }
 
 # --- Basic widget creation ---
@@ -585,6 +577,79 @@ test_that("a5_view_pyramid refuses files without an A5 index version", {
   expect_error(a5_view_pyramid(old), "Rebuild it")
 })
 
+test_that("a5_view_pyramid refuses pyramids in a5view 0.3's layout", {
+  old <- withr::local_tempfile(fileext = ".parquet")
+  tbl <- arrow::arrow_table(
+    cell = a5R::a5_cell_to_arrow(make_cells(3, res = 8)),
+    `_lod` = arrow::Array$create(rep(8L, 3), type = arrow::uint8())
+  )
+  tbl <- tbl$ReplaceSchemaMetadata(list(
+    a5view_row_groups = "[]", a5_index = "1.0", a5view_meta = "{}"
+  ))
+  arrow::write_parquet(tbl, old)
+  expect_error(a5_view_pyramid(old), "older layout")
+})
+
+# Cells over a small region at one resolution, with a value per cell.
+make_region <- function(res = 12L) {
+  centre <- a5R::a5_lonlat_to_cell(-3.19, 55.95, resolution = 9)
+  cells <- a5R::a5_uncompact(a5R::a5_spherical_cap(centre, 4000), resolution = res)
+  set.seed(1)
+  data.frame(cell = cells, value = stats::runif(length(cells)))
+}
+
+test_that("pyramids are a5pyramid files with a5view's payload columns", {
+  df <- make_region()
+  path <- withr::local_tempfile(fileext = ".parquet")
+  a5_build_pyramid(df, path, fill = value)
+  info <- a5pyramid::a5_pyramid_info(path)
+  expect_identical(info$lods, 2:12)
+  expect_identical(info$data_resolution, 12L)
+  expect_identical(info$a5_index, "1.0")
+  cols <- info$columns
+  expect_setequal(cols$name, c("_fill_r", "_fill_g", "_fill_b", "_fill_a", "_fill_value"))
+  expect_true(all(cols$type[cols$name != "_fill_value"] == "uint8"))
+  expect_identical(cols$type[cols$name == "_fill_value"], "float32")
+  expect_true(all(cols$reducer == "rep_child"))
+
+  # the leaves keep their values and colours
+  leaves <- a5pyramid::a5_read_pyramid(path, lod = 12L)
+  ref <- df[order(a5R::a5_u64_to_hex(df$cell)), ]
+  expect_identical(a5R::a5_u64_to_hex(leaves$cell), a5R::a5_u64_to_hex(ref$cell))
+  expect_equal(leaves$`_fill_value`, ref$value, tolerance = 1e-6)
+
+  # rep_child keeps colours that occur among the leaves
+  coarse <- a5pyramid::a5_read_pyramid(path, lod = 8L)
+  rgba <- function(x) paste(x$`_fill_r`, x$`_fill_g`, x$`_fill_b`, x$`_fill_a`)
+  expect_true(all(rgba(coarse) %in% rgba(leaves)))
+
+  meta <- read_pyramid_meta(path)
+  expect_identical(unlist(meta$lod_resolutions), 2:12)
+  w <- a5_view_pyramid(path)
+  expect_identical(unlist(w$x$lod_resolutions), 2:12)
+})
+
+test_that("lod_step sets the LOD schedule", {
+  df <- make_region()
+  expect_identical(pyramid_lods(12L, 1L), 11:2)
+  expect_identical(pyramid_lods(12L, 3L), c(9L, 6L, 3L))
+  expect_identical(pyramid_lods(12L, 20L), integer())
+  expect_identical(pyramid_lods(2L, 1L), integer())
+  w <- a5_view(df, fill = value, aggregate = "mean", lod_step = 4L)
+  expect_identical(unlist(w$x$lod_resolutions), c(4L, 8L, 12L))
+  # a step past the data resolution keeps only the leaves
+  w <- a5_view(df, fill = value, aggregate = "mean", lod_step = 20L)
+  expect_identical(unlist(w$x$lod_resolutions), 12L)
+})
+
+test_that("a uniform fill makes a pyramid without payload columns", {
+  path <- withr::local_tempfile(fileext = ".parquet")
+  a5_build_pyramid(make_region()$cell, path, aggregate = "mean")
+  info <- a5pyramid::a5_pyramid_info(path)
+  expect_identical(nrow(info$columns), 0L)
+  expect_s3_class(a5_view_pyramid(path), "a5view")
+})
+
 # A disk compacts to cells at more than one resolution.
 make_covering <- function() {
   cell <- a5R::a5_lonlat_to_cell(-3.19, 55.95, resolution = 9)
@@ -615,6 +680,12 @@ test_that("a covering column repeats its row per stored cell", {
   expect_true(a5R::is_a5_cell(out$area))
   w <- a5_view(df, fill = id)
   expect_equal(w$x$legend$label, "id")
+})
+
+test_that("pyramids refuse duplicated cells", {
+  cells <- make_cells(3, res = 8)
+  expect_error(a5_view(c(cells, cells[1]), aggregate = "mean"), "each cell once")
+  expect_no_error(a5_view(c(cells, cells[1])))
 })
 
 test_that("pyramids refuse mixed resolutions", {

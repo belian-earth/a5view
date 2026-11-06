@@ -29,7 +29,7 @@ dependencies:
     script:
       - hyparquet-bootstrap.js
   - name: a5view-tiling
-    version: 0.3.0
+    version: 0.3.0.9000
     src:
       file: htmlwidgets/lib/a5view-tiling
     script:
