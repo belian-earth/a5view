@@ -21,7 +21,8 @@ Roxygen: list(markdown = TRUE)
 Depends:
     R (>= 3.5)
 Imports:
-    a5R (>= 0.9.9.9001),
+    a5pyramid,
+    a5R (>= 1.0.0),
     arrow,
     base64enc,
     cli,
@@ -43,6 +44,7 @@ Suggests:
     withr,
     wk
 Remotes:
+    belian-earth/a5pyramid,
     belian-earth/a5R,
     r-spatial/geoarrowWidget
 Config/testthat/edition: 3

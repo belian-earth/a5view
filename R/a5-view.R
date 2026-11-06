@@ -84,15 +84,18 @@
 #'   - `"none"` (default): no precomputed pyramid. All cells are shipped
 #'     as Arrow IPC and rendered through deck.gl's `A5Layer`. Cheapest
 #'     to build, suitable for small to medium datasets.
-#'   - `"rep_child"`: each parent inherits the row of the child whose
-#'     payload (RGBA + optional `fill_value`/`elevation`) is closest in
-#'     Euclidean distance to its parent's mean. Preserves real values,
-#'     no blending. Use for embedding/RGB visualisations.
+#'   - `"rep_child"`: each parent takes the payload (RGBA and the
+#'     optional fill value and elevation) of its representative child,
+#'     the child closest to the parent's mean with each payload column
+#'     scaled by its standard deviation, so no one unit dominates.
+#'     Preserves real values, no blending. Use for embedding/RGB
+#'     visualisations.
 #'   - `"mean"`: each numeric payload column is averaged independently
 #'     within the parent group. Best for scalar fields; blends colours
 #'     in RGB space, which can mute embedding visualisations.
-#'   When set to `"rep_child"` or `"mean"`, the pyramid is serialised to
-#'   parquet with a spatial row-group index. The browser decodes only
+#'   When set to `"rep_child"` or `"mean"`, the pyramid is built and
+#'   written to parquet by [a5pyramid::a5_write_pyramid()], with a
+#'   spatial row-group index (see [a5_build_pyramid()]). The browser decodes only
 #'   the row groups intersecting the viewport at the level of detail
 #'   matching the current zoom. Inside Shiny the parquet file is served
 #'   over HTTP with byte-range support, so only the footer and the

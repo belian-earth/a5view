@@ -83,6 +83,15 @@ the result to a parquet file. The file can be replayed by
 datasets where the pyramid takes time to compute.
 }
 \details{
+The pyramid is built and written by \code{\link[a5pyramid:a5_write_pyramid]{a5pyramid::a5_write_pyramid()}}, in
+parallel on \code{\link[a5pyramid:a5pyramid_threads]{a5pyramid::a5pyramid_threads()}} threads, so the file is an
+a5pyramid file: \code{\link[a5pyramid:a5_pyramid_info]{a5pyramid::a5_pyramid_info()}} and
+\code{\link[a5pyramid:a5_read_pyramid]{a5pyramid::a5_read_pyramid()}} read it, and any renderer that reads the
+a5pyramid format can draw it. The payload columns are \verb{_fill_r},
+\verb{_fill_g}, \verb{_fill_b} and \verb{_fill_a} (\code{uint8}) when \code{fill} gives per-cell
+colours, \verb{_fill_value} (\code{float32}) when it maps values, and
+\verb{_elevation}.
+
 Colours are baked into the parquet (as \verb{_fill_r/g/b/a} columns when
 \code{fill} produces per-cell colours, or as a single uniform colour
 stored in the file's KV metadata otherwise). One file therefore

@@ -6,13 +6,21 @@
 // pans/zooms decode any newly-required row groups; everything else is
 // served from a per-row-group cache of packed geometry.
 //
-// Wire format (set by R/prep-data.R::serialise_pyramid_to_parquet):
-//   - Parquet sorted by `_lod` ASC; each row group holds a single LOD.
-//     Large LODs are bucketed by parent cell at `lod - pivot_offset`.
-//     Each row group's KV entry carries `{rg, lod_min, lod_max, west,
-//     south, east, north, tile_id?}` where `tile_id` is the parent
-//     cell's hex id (absent for the small, non-tiled LODs).
-//   - Schema KV metadata key `a5view_row_groups` holds that JSON array.
+// Wire format: an a5pyramid file (written by a5pyramid::a5_write_pyramid()
+// through R/prep-data.R::write_pyramid(); specified in a5pyramid's
+// FORMAT.md):
+//   - Row groups follow the levels in ascending LOD order; each row group
+//     holds one level and is one tile, a run of consecutive cell ids.
+//   - Schema KV metadata key `a5pyramid` holds the JSON index: `levels`
+//     (each `{lod, rows, row_groups: [start, end)}`) and `row_group_bbox`,
+//     `[west, south, east, north]` per row group, flat. `west > east`
+//     means the box crosses the antimeridian.
+//   - KV `a5_index` records the A5 index version of the cell ids.
+//   - Columns `cell` (uint64), `lod`, `ncell`, then the payload columns
+//     `_fill_r/g/b/a`, `_fill_value`, `_elevation` as present.
+//   Every row group is one tile of the TileLayer for its level. Row
+//   groups of levels with at most TILING.EAGER_MAX_ROWS rows are decoded
+//   as soon as the file opens.
 //
 // Work split:
 //   - A Web Worker owns the parquet source (inline bytes or an HTTP URL
@@ -27,12 +35,10 @@
 //     libraries) the same packing code runs on the main thread.
 //
 // Render strategy:
-//   - LODs whose row groups carry `tile_id`s render through a deck.gl
-//     TileLayer + an A5-aware Tileset2D; each tile is one
+//   - Every LOD renders through a deck.gl TileLayer + an A5-aware
+//     Tileset2D whose tiles are the level's row groups; each tile is one
 //     SolidPolygonLayer (PolygonLayer when stroked and cells are big
 //     enough on screen to show a border).
-//   - Small LODs (no tile_id) render as one SolidPolygonLayer over the
-//     concatenation of their row groups.
 //
 // Dependencies:
 //   - window.A5ViewHyparquetReady / window.A5ViewHyparquetUrl (set by
@@ -55,6 +61,10 @@
   // Below this projected edge length (CSS px) cell borders are skipped:
   // they would only smear the fill and double the per-tile layer count.
   TILING.MIN_STROKE_PX = 3;
+
+  // Row groups of levels with at most this many rows are decoded as soon
+  // as the file opens: they cover the wide zooms, and are small.
+  TILING.EAGER_MAX_ROWS = 10000;
 
   // ───────────────────────────────────────────────────────────────────
   // Tile core: source handling + row-group decode + geometry packing.
@@ -169,8 +179,8 @@
       return BigInt(v);
     }
 
-    // source: { b64 } or { url, bytes }. Resolves to the KV row-group
-    // index (array) once the footer has been read.
+    // source: { b64 } or { url, bytes }. Resolves to the a5pyramid index
+    // (the parsed `a5pyramid` KV entry) once the footer has been read.
     function open(source) {
       var p;
       if (source.url) {
@@ -192,11 +202,19 @@
           off += n;
           return o;
         });
-        var kv = (md.key_value_metadata || []).filter(function (e) {
-          return e.key === "a5view_row_groups";
-        })[0];
-        if (!kv) throw new Error("parquet missing a5view_row_groups KV");
-        return JSON.parse(kv.value);
+        var kv = {};
+        (md.key_value_metadata || []).forEach(function (e) { kv[e.key] = e.value; });
+        if (!kv.a5pyramid) {
+          throw new Error("not an a5pyramid file (no `a5pyramid` metadata); rebuild it with a5_build_pyramid()");
+        }
+        var index = JSON.parse(kv.a5pyramid);
+        if (!(index.format_version <= 1)) {
+          throw new Error("a5pyramid format version " + index.format_version + " is newer than this viewer reads");
+        }
+        if (kv.a5_index !== "1.0") {
+          throw new Error("the file's cells are not A5 1.0 ids (a5_index " + kv.a5_index + ")");
+        }
+        return index;
       });
     }
 
@@ -304,8 +322,8 @@
         loadLibs(msg.libs).then(function (mods) {
           core = tileCore(mods[0], mods[1]);
           return core.open(msg.source);
-        }).then(function (rgIndex) {
-          self.postMessage({ type: "opened", id: msg.id, rgIndex: rgIndex });
+        }).then(function (index) {
+          self.postMessage({ type: "opened", id: msg.id, index: index });
         }).catch(function (e) {
           self.postMessage({ type: "error", id: msg.id, message: String(e && e.message || e) });
         });
@@ -336,7 +354,7 @@
   }
 
   // Uniform promise-based front over either a worker or the in-thread
-  // core: { open(source) -> Promise<rgIndex>, decode(rg) -> Promise<packed>,
+  // core: { open(source) -> Promise<a5pyramid index>, decode(rg) -> Promise<packed>,
   // close(), isWorker }
   function makeDecoder(libUrls) {
     var worker = makeWorker();
@@ -365,7 +383,7 @@
       return {
         isWorker: true,
         open: function (source) {
-          return send({ type: "open", source: source, libs: libUrls }).then(function (m) { return m.rgIndex; });
+          return send({ type: "open", source: source, libs: libUrls }).then(function (m) { return m.index; });
         },
         decode: function (rg) { return send({ type: "decode", rg: rg }); },
         close: function () { worker.terminate(); pending.clear(); }
@@ -430,21 +448,31 @@
     return out;
   }
 
-  // Test whether a [w, s, e, n] bbox overlaps a query bbox that may
-  // straddle the antimeridian (west > east).
+  // Longitude range west..east as one or two intervals within -180..180
+  // (two when it crosses the antimeridian, west > east).
+  function lonIntervals(west, east) {
+    return west <= east ? [[west, east]] : [[west, 180], [-180, east]];
+  }
+
+  // Test whether a [w, s, e, n] box overlaps a query box; either may
+  // cross the antimeridian (west > east).
   function bboxOverlapXY(b, q) {
-    if (q.west <= q.east) {
-      return !(b[2] < q.west || b[0] > q.east || b[3] < q.south || b[1] > q.north);
+    if (b[3] < q.south || b[1] > q.north) return false;
+    var bi = lonIntervals(b[0], b[2]);
+    var qi = lonIntervals(q.west, q.east);
+    for (var i = 0; i < bi.length; i++) {
+      for (var j = 0; j < qi.length; j++) {
+        if (bi[i][0] <= qi[j][1] && qi[j][0] <= bi[i][1]) return true;
+      }
     }
-    return (!(b[2] < q.west || b[0] > 180 || b[3] < q.south || b[1] > q.north)) ||
-           (!(b[2] < -180 || b[0] > q.east || b[3] < q.south || b[1] > q.north));
+    return false;
   }
 
   var EMPTY_DATA = [];
 
   LAZY.createRenderer = function (ctx) {
     var decoder = null;
-    var rgIndex = null;             // KV entries, one per row group
+    var rgIndex = null;             // one entry per row group, from the index
     var decodedCache = new Map();   // rg -> packed geometry
     var pendingDecodes = new Map(); // rg -> Promise
     var loadVersion = 0;
@@ -453,8 +481,6 @@
     // Per-LOD lookup tables built from rgIndex.
     var tilesByLod = new Map();     // lod -> Map<tileHex, [rgIdx, ...]>
     var bboxByLod = new Map();      // lod -> Map<tileHex, [w, s, e, n]>
-    var flatByLod = new Map();      // lod -> [rgIdx, ...]
-    var flatGeomCache = new Map();  // lod -> { count, geom }
     var tileGeomCache = new Map();  // lod -> Map<tileHex, { count, geom }>
     var tilesetClassesByLod = new Map();
     var layerMemo = new Map();      // layerId -> { key, layer }
@@ -483,8 +509,6 @@
       decodeQueue = [];
       tilesByLod = new Map();
       bboxByLod = new Map();
-      flatByLod = new Map();
-      flatGeomCache = new Map();
       tileGeomCache = new Map();
       tilesetClassesByLod = new Map();
       layerMemo = new Map();
@@ -512,41 +536,40 @@
       decoder = makeDecoder(libUrls());
       return decoder.open(source).then(function (index) {
         if (thisLoad !== loadVersion) return;
-        rgIndex = index;
+        // One entry per row group, as the renderer indexes them:
+        // { rg, lod_min, lod_max, west, south, east, north, tile_id, eager }.
+        // Each row group is its own tile.
+        rgIndex = [];
+        var boxes = index.row_group_bbox;
+        index.levels.forEach(function (level) {
+          var eager = level.rows <= TILING.EAGER_MAX_ROWS;
+          for (var rg = level.row_groups[0]; rg < level.row_groups[1]; rg++) {
+            rgIndex.push({
+              rg: rg, lod_min: level.lod, lod_max: level.lod,
+              west: boxes[4 * rg], south: boxes[4 * rg + 1],
+              east: boxes[4 * rg + 2], north: boxes[4 * rg + 3],
+              tile_id: "rg" + rg, eager: eager
+            });
+          }
+        });
         for (var k = 0; k < rgIndex.length; k++) {
           var entry = rgIndex[k];
           var lod = entry.lod_min;
-          if (entry.tile_id) {
-            var byTile = tilesByLod.get(lod);
-            if (!byTile) { byTile = new Map(); tilesByLod.set(lod, byTile); }
-            var lst = byTile.get(entry.tile_id);
-            if (!lst) { lst = []; byTile.set(entry.tile_id, lst); }
-            lst.push(entry.rg);
-            var bboxByTile = bboxByLod.get(lod);
-            if (!bboxByTile) { bboxByTile = new Map(); bboxByLod.set(lod, bboxByTile); }
-            var bb = bboxByTile.get(entry.tile_id);
-            if (bb) {
-              if (entry.west < bb[0]) bb[0] = entry.west;
-              if (entry.south < bb[1]) bb[1] = entry.south;
-              if (entry.east > bb[2]) bb[2] = entry.east;
-              if (entry.north > bb[3]) bb[3] = entry.north;
-            } else {
-              bboxByTile.set(entry.tile_id, [entry.west, entry.south, entry.east, entry.north]);
-            }
-          } else {
-            var flat = flatByLod.get(lod);
-            if (!flat) { flat = []; flatByLod.set(lod, flat); }
-            flat.push(entry.rg);
-          }
+          var byTile = tilesByLod.get(lod);
+          if (!byTile) { byTile = new Map(); tilesByLod.set(lod, byTile); }
+          byTile.set(entry.tile_id, [entry.rg]);
+          var bboxByTile = bboxByLod.get(lod);
+          if (!bboxByTile) { bboxByTile = new Map(); bboxByLod.set(lod, bboxByTile); }
+          bboxByTile.set(entry.tile_id, [entry.west, entry.south, entry.east, entry.north]);
         }
         ready = true;
         log("[a5view] init: " + (nowMs() - t0).toFixed(0) + "ms, rg=" + rgIndex.length +
-            " tiledLods=" + tilesByLod.size + " flatLods=" + flatByLod.size +
+            " lods=" + tilesByLod.size +
             (decoder.isWorker ? " (worker)" : " (main thread)"));
-        // The small, non-tiled LODs cover wide zooms and are almost
-        // always needed first; fetch them eagerly.
+        // The small LODs cover wide zooms and are almost always needed
+        // first; fetch them eagerly.
         for (var p = 0; p < rgIndex.length; p++) {
-          if (!rgIndex[p].tile_id) decodeRowGroup(rgIndex[p].rg);
+          if (rgIndex[p].eager) decodeRowGroup(rgIndex[p].rg);
         }
       });
     }
@@ -663,27 +686,6 @@
         return new window.deck.PolygonLayer(props);
       }
       return new window.deck.SolidPolygonLayer(props);
-    }
-
-    // Flat path: one layer over every decoded row group of a small LOD.
-    function buildFlatLayer(x, lod, rgs, stroked) {
-      var count = 0;
-      var parts = [];
-      for (var i = 0; i < rgs.length; i++) {
-        var g = decodedCache.get(rgs[i]);
-        if (g) { parts.push(g); count++; }
-        else decodeRowGroup(rgs[i]);
-      }
-      if (parts.length === 0) return null;
-      var cached = flatGeomCache.get(lod);
-      if (!cached || cached.count !== count) {
-        cached = { count: count, geom: concatPacked(parts) };
-        flatGeomCache.set(lod, cached);
-      }
-      var layerId = "a5-lazy-flat-lod" + lod + "-v" + loadVersion;
-      return memoLayer(layerId, count + "|" + styleKey(x, stroked), function () {
-        return buildGeomLayer(x, cached.geom, layerId, stroked, { beforeId: ctx.getBeforeId() });
-      });
     }
 
     // Geometry for one tile, cached until more of its row groups land.
@@ -837,6 +839,9 @@
         getTileMetadata(index) {
           if (!index) return null;
           var b = bboxByTile.get(index.i) || [-180, -85.05, 180, 85.05];
+          // deck.gl expects west <= east; widen a tile across the
+          // antimeridian to every longitude (getTileIndices culls exactly)
+          if (b[0] > b[2]) b = [-180, b[1], 180, b[3]];
           return { bbox: { west: b[0], south: b[1], east: b[2], north: b[3] } };
         }
         getTileZoom() { return lod; }
@@ -891,16 +896,10 @@
       var stroked = !!x.stroked && cellEdgePx(lod, viewport) >= TILING.MIN_STROKE_PX;
       var byTile = tilesByLod.get(lod);
       if (byTile && byTile.size > 0) return buildTiledLayer(x, lod, byTile, stroked);
-      var flat = flatByLod.get(lod);
-      if (flat && flat.length > 0) return buildFlatLayer(x, lod, flat, stroked);
       return null;
     }
 
     function lodHasDecodedData(lod) {
-      var flat = flatByLod.get(lod);
-      if (flat) {
-        for (var i = 0; i < flat.length; i++) if (decodedCache.has(flat[i])) return true;
-      }
       var byTile = tilesByLod.get(lod);
       if (!byTile) return false;
       var found = false;
@@ -997,7 +996,6 @@
           pending: pendingDecodes.size,
           queued: decodeQueue.length,
           tiledLods: tilesByLod.size,
-          flatLods: flatByLod.size,
           indexedLods: Array.from(rowsByLod.keys()),
           dirtyTiles: Array.from(dirtyTiles.values()).reduce(function (a, s) { return a + s.size; }, 0),
           retryPending: !!retryTimer,
