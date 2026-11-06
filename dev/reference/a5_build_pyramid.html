@@ -145,7 +145,15 @@ auto-centres on the cell centroids.</p></dd>
     </div>
     <div class="section level2">
     <h2 id="details">Details<a class="anchor" aria-label="anchor" href="#details"></a></h2>
-    <p>Colours are baked into the parquet (as <code>_fill_r/g/b/a</code> columns when
+    <p>The pyramid is built and written by <code><a href="https://rdrr.io/pkg/a5pyramid/man/a5_write_pyramid.html" class="external-link">a5pyramid::a5_write_pyramid()</a></code>, in
+parallel on <code><a href="https://rdrr.io/pkg/a5pyramid/man/a5pyramid_threads.html" class="external-link">a5pyramid::a5pyramid_threads()</a></code> threads, so the file is an
+a5pyramid file: <code><a href="https://rdrr.io/pkg/a5pyramid/man/a5_pyramid_info.html" class="external-link">a5pyramid::a5_pyramid_info()</a></code> and
+<code><a href="https://rdrr.io/pkg/a5pyramid/man/a5_read_pyramid.html" class="external-link">a5pyramid::a5_read_pyramid()</a></code> read it, and any renderer that reads the
+a5pyramid format can draw it. The payload columns are <code>_fill_r</code>,
+<code>_fill_g</code>, <code>_fill_b</code> and <code>_fill_a</code> (<code>uint8</code>) when <code>fill</code> gives per-cell
+colours, <code>_fill_value</code> (<code>float32</code>) when it maps values, and
+<code>_elevation</code>.</p>
+<p>Colours are baked into the parquet (as <code>_fill_r/g/b/a</code> columns when
 <code>fill</code> produces per-cell colours, or as a single uniform colour
 stored in the file's KV metadata otherwise). One file therefore
 encodes one colour scheme; swapping palettes requires rebuilding.</p>

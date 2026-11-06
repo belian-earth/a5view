@@ -34,10 +34,30 @@
 
     <div class="section level2">
 <h2 class="pkg-version" data-toc-text="development version" id="a5view-development-version">a5view (development version)<a class="anchor" aria-label="anchor" href="#a5view-development-version"></a></h2>
+<div class="section level3">
+<h3 id="pyramids-built-by-a5pyramid-development-version">Pyramids built by a5pyramid<a class="anchor" aria-label="anchor" href="#pyramids-built-by-a5pyramid-development-version"></a></h3>
+<ul><li>Pyramids are built and written by a5pyramid, a new import: a Rust engine that builds every level in parallel, on <code><a href="https://rdrr.io/pkg/a5pyramid/man/a5pyramid_threads.html" class="external-link">a5pyramid::a5pyramid_threads()</a></code> threads. On 439,276 cells with four colour channels and a fill value, building and writing a pyramid takes 0.5 s instead of 4.1 s, and the parquet file is about 30% smaller. <code><a href="../reference/a5_view.html">a5_view()</a></code>, <code><a href="../reference/a5_view_update.html">a5_view_update()</a></code> and <code><a href="../reference/a5_build_pyramid.html">a5_build_pyramid()</a></code> take the same arguments as before.</li>
+<li>
+<strong>Breaking:</strong> pyramid files are in a5pyramid’s format (its <code>FORMAT.md</code>), which any a5pyramid reader can open; in R, <code><a href="https://rdrr.io/pkg/a5pyramid/man/a5_pyramid_info.html" class="external-link">a5pyramid::a5_pyramid_info()</a></code> and <code><a href="https://rdrr.io/pkg/a5pyramid/man/a5_read_pyramid.html" class="external-link">a5pyramid::a5_read_pyramid()</a></code> read them. <code><a href="../reference/a5_view_pyramid.html">a5_view_pyramid()</a></code> refuses files written by a5view 0.3 and asks for them to be rebuilt with <code><a href="../reference/a5_build_pyramid.html">a5_build_pyramid()</a></code>. In the new format:
+<ul><li>each row group is one tile, a run of consecutive cell ids split along the A5 hierarchy, so sparse data no longer makes many tiny row groups;</li>
+<li>row group boxes come from the cells’ boundaries rather than padded centres, and a box across the antimeridian crosses it (<code>west &gt; east</code>) instead of covering the whole globe, so such tiles are fetched only in view;</li>
+<li>the index is the <code>a5pyramid</code> metadata key (was <code>a5view_row_groups</code>), the LOD column is <code>lod</code> (was <code>_lod</code>), and a new <code>ncell</code> column counts the cells each row summarises.</li>
+</ul></li>
+<li>
+<strong>Breaking:</strong> a pyramid needs each cell once. Duplicated cells, which were drawn on top of each other and counted twice in their parents’ means, are an error that suggests combining them or drawing them with <code>aggregate = "none"</code>.</li>
+<li>
+<code>"rep_child"</code> scales each payload column by its standard deviation before measuring each child’s distance to its parent’s mean, so a fill value in large units no longer outweighs the colour channels, and ties go to the child with the lowest cell id rather than to rounding.</li>
+<li>Pyramid levels could draw nothing when cells had outlines (the default <code>border</code>): zooming out from the initial view of <code>s2_santiago</code> showed no cells at LOD 16 and coarser. Outlined tiles were drawn with deck.gl’s <code>PolygonLayer</code>, which with binary geometry finds no outlines and then draws neither outlines nor fill, and outlined and plain layers shared ids, so a level once outlined stayed blank. Tiles now draw a <code>SolidPolygonLayer</code> and a <code>PathLayer</code> of outlines, under ids that include the outline state.</li>
+<li>A <code>lod_step</code> reaching below LOD 2 no longer errors (“wrong sign in ‘by’ argument”); the pyramid then holds the data resolution only.</li>
+<li>Internals: the lazy renderer reads the a5pyramid index and draws every level as tiles, one per row group, decoding the row groups of levels of up to 10,000 cells as soon as the file opens. The <code>a5view-tiling</code> dependency is versioned 0.3.0.9000, so browsers do not reuse the old script.</li>
+</ul></div>
+<div class="section level3">
+<h3 id="other-changes-development-version">Other changes<a class="anchor" aria-label="anchor" href="#other-changes-development-version"></a></h3>
 <ul><li>
 <code><a href="../reference/geom_a5.html">geom_a5()</a></code> no longer warns “<code>closed</code> was renamed <code>closed_ring</code>” with a5R 1.0.0: it relies on <code><a href="https://belian-earth.github.io/a5R/reference/a5_cell_to_boundary_xy.html" class="external-link">a5_cell_to_boundary_xy()</a></code>’s open-ring default instead of naming the argument.</li>
 <li>The example apps use <code><a href="https://belian-earth.github.io/a5R/reference/a5_threads.html" class="external-link">a5R::a5_threads()</a></code>, which replaces <code><a href="https://belian-earth.github.io/a5R/reference/a5_set_threads.html" class="external-link">a5_set_threads()</a></code> in a5R 0.9.9.9006.</li>
 </ul></div>
+</div>
     <div class="section level2">
 <h2 class="pkg-version" data-toc-text="0.3.0" id="a5view-030">a5view 0.3.0<a class="anchor" aria-label="anchor" href="#a5view-030"></a></h2>
 <div class="section level3">

@@ -140,7 +140,9 @@ child for colour composites), and the browser decodes only the levels
 and areas in view.
 [`a5_build_pyramid()`](https://belian-earth.github.io/a5view/dev/reference/a5_build_pyramid.md)
 writes the pyramid to a parquet file once, so it can be viewed again
-without rebuilding.
+without rebuilding. Pyramids are built in parallel by
+[a5pyramid](https://github.com/belian-earth/a5pyramid), in its parquet
+format, which any a5pyramid reader can open.
 
 ``` r
 

@@ -122,6 +122,19 @@ a5_build_pyramid(
 
 ## Details
 
+The pyramid is built and written by
+[`a5pyramid::a5_write_pyramid()`](https://rdrr.io/pkg/a5pyramid/man/a5_write_pyramid.html),
+in parallel on
+[`a5pyramid::a5pyramid_threads()`](https://rdrr.io/pkg/a5pyramid/man/a5pyramid_threads.html)
+threads, so the file is an a5pyramid file:
+[`a5pyramid::a5_pyramid_info()`](https://rdrr.io/pkg/a5pyramid/man/a5_pyramid_info.html)
+and
+[`a5pyramid::a5_read_pyramid()`](https://rdrr.io/pkg/a5pyramid/man/a5_read_pyramid.html)
+read it, and any renderer that reads the a5pyramid format can draw it.
+The payload columns are `_fill_r`, `_fill_g`, `_fill_b` and `_fill_a`
+(`uint8`) when `fill` gives per-cell colours, `_fill_value` (`float32`)
+when it maps values, and `_elevation`.
+
 Colours are baked into the parquet (as `_fill_r/g/b/a` columns when
 `fill` produces per-cell colours, or as a single uniform colour stored
 in the file's KV metadata otherwise). One file therefore encodes one

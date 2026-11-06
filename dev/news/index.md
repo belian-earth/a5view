@@ -2,6 +2,66 @@
 
 ## a5view (development version)
 
+### Pyramids built by a5pyramid
+
+- Pyramids are built and written by a5pyramid, a new import: a Rust
+  engine that builds every level in parallel, on
+  [`a5pyramid::a5pyramid_threads()`](https://rdrr.io/pkg/a5pyramid/man/a5pyramid_threads.html)
+  threads. On 439,276 cells with four colour channels and a fill value,
+  building and writing a pyramid takes 0.5 s instead of 4.1 s, and the
+  parquet file is about 30% smaller.
+  [`a5_view()`](https://belian-earth.github.io/a5view/dev/reference/a5_view.md),
+  [`a5_view_update()`](https://belian-earth.github.io/a5view/dev/reference/a5_view_update.md)
+  and
+  [`a5_build_pyramid()`](https://belian-earth.github.io/a5view/dev/reference/a5_build_pyramid.md)
+  take the same arguments as before.
+- **Breaking:** pyramid files are in a5pyramid’s format (its
+  `FORMAT.md`), which any a5pyramid reader can open; in R,
+  [`a5pyramid::a5_pyramid_info()`](https://rdrr.io/pkg/a5pyramid/man/a5_pyramid_info.html)
+  and
+  [`a5pyramid::a5_read_pyramid()`](https://rdrr.io/pkg/a5pyramid/man/a5_read_pyramid.html)
+  read them.
+  [`a5_view_pyramid()`](https://belian-earth.github.io/a5view/dev/reference/a5_view_pyramid.md)
+  refuses files written by a5view 0.3 and asks for them to be rebuilt
+  with
+  [`a5_build_pyramid()`](https://belian-earth.github.io/a5view/dev/reference/a5_build_pyramid.md).
+  In the new format:
+  - each row group is one tile, a run of consecutive cell ids split
+    along the A5 hierarchy, so sparse data no longer makes many tiny row
+    groups;
+  - row group boxes come from the cells’ boundaries rather than padded
+    centres, and a box across the antimeridian crosses it
+    (`west > east`) instead of covering the whole globe, so such tiles
+    are fetched only in view;
+  - the index is the `a5pyramid` metadata key (was `a5view_row_groups`),
+    the LOD column is `lod` (was `_lod`), and a new `ncell` column
+    counts the cells each row summarises.
+- **Breaking:** a pyramid needs each cell once. Duplicated cells, which
+  were drawn on top of each other and counted twice in their parents’
+  means, are an error that suggests combining them or drawing them with
+  `aggregate = "none"`.
+- `"rep_child"` scales each payload column by its standard deviation
+  before measuring each child’s distance to its parent’s mean, so a fill
+  value in large units no longer outweighs the colour channels, and ties
+  go to the child with the lowest cell id rather than to rounding.
+- Pyramid levels could draw nothing when cells had outlines (the default
+  `border`): zooming out from the initial view of `s2_santiago` showed
+  no cells at LOD 16 and coarser. Outlined tiles were drawn with
+  deck.gl’s `PolygonLayer`, which with binary geometry finds no outlines
+  and then draws neither outlines nor fill, and outlined and plain
+  layers shared ids, so a level once outlined stayed blank. Tiles now
+  draw a `SolidPolygonLayer` and a `PathLayer` of outlines, under ids
+  that include the outline state.
+- A `lod_step` reaching below LOD 2 no longer errors (“wrong sign in
+  ‘by’ argument”); the pyramid then holds the data resolution only.
+- Internals: the lazy renderer reads the a5pyramid index and draws every
+  level as tiles, one per row group, decoding the row groups of levels
+  of up to 10,000 cells as soon as the file opens. The `a5view-tiling`
+  dependency is versioned 0.3.0.9000, so browsers do not reuse the old
+  script.
+
+### Other changes
+
 - [`geom_a5()`](https://belian-earth.github.io/a5view/dev/reference/geom_a5.md)
   no longer warns “`closed` was renamed `closed_ring`” with a5R 1.0.0:
   it relies on
