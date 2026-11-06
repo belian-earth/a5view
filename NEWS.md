@@ -31,6 +31,14 @@
   measuring each child's distance to its parent's mean, so a fill value in
   large units no longer outweighs the colour channels, and ties go to the
   child with the lowest cell id rather than to rounding.
+* Pyramid levels could draw nothing when cells had outlines (the default
+  `border`): zooming out from the initial view of `s2_santiago` showed no
+  cells at LOD 16 and coarser. Outlined tiles were drawn with deck.gl's
+  `PolygonLayer`, which with binary geometry finds no outlines and then
+  draws neither outlines nor fill, and outlined and plain layers shared
+  ids, so a level once outlined stayed blank. Tiles now draw a
+  `SolidPolygonLayer` and a `PathLayer` of outlines, under ids that include
+  the outline state.
 * A `lod_step` reaching below LOD 2 no longer errors ("wrong sign in 'by'
   argument"); the pyramid then holds the data resolution only.
 * Internals: the lazy renderer reads the a5pyramid index and draws every

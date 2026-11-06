@@ -37,8 +37,10 @@
 // Render strategy:
 //   - Every LOD renders through a deck.gl TileLayer + an A5-aware
 //     Tileset2D whose tiles are the level's row groups; each tile is one
-//     SolidPolygonLayer (PolygonLayer when stroked and cells are big
-//     enough on screen to show a border).
+//     SolidPolygonLayer, plus a PathLayer of outlines when stroked and
+//     cells are big enough on screen to show a border (see
+//     buildGeomLayer). A change of stroke starts a fresh TileLayer, so
+//     tiles are rebuilt with or without outlines.
 //
 // Dependencies:
 //   - window.A5ViewHyparquetReady / window.A5ViewHyparquetUrl (set by
@@ -484,6 +486,7 @@
     var tileGeomCache = new Map();  // lod -> Map<tileHex, { count, geom }>
     var tilesetClassesByLod = new Map();
     var layerMemo = new Map();      // layerId -> { key, layer }
+    var currentTilesId = new Map(); // lod -> id of its current TileLayer
     var dirtyTiles = new Map();     // lod -> Set<tileHex>
     // Hover lookup: lod -> { index: Map<hex, [rg, i]>, pending: [rg, ...] }
     var rowsByLod = new Map();
@@ -512,6 +515,7 @@
       tileGeomCache = new Map();
       tilesetClassesByLod = new Map();
       layerMemo = new Map();
+      currentTilesId = new Map();
       dirtyTiles = new Map();
       rowsByLod = new Map();
       lastBuiltLod = null;
@@ -647,8 +651,13 @@
               x.extruded, x.elevation_scale, x.fill_per_cell].join("|");
     }
 
-    // One SolidPolygonLayer (or PolygonLayer with stroke) over a packed
-    // geometry block, via binary attributes.
+    // A SolidPolygonLayer over a packed geometry block, via binary
+    // attributes, plus a PathLayer of the cell outlines when stroked.
+    // PolygonLayer is not used: it derives its outlines through the
+    // `getPolygon` accessor, which binary data does not supply, finds no
+    // paths, and then draws neither its outlines nor its fill. Each class
+    // keeps its own id, so deck.gl never carries one layer's state into
+    // another class.
     function buildGeomLayer(x, geom, layerId, stroked, extra) {
       var data = {
         length: geom.n,
@@ -677,15 +686,26 @@
         data.attributes.getElevation = { value: geom.elevation, size: 1 };
       }
       for (var k in extra) props[k] = extra[k];
-      if (stroked) {
-        props.stroked = true;
-        props.filled = true;
-        props.getLineColor = x.line_color || [0, 0, 0, 0];
-        props.getLineWidth = x.line_width || 1;
-        props.lineWidthUnits = "pixels";
-        return new window.deck.PolygonLayer(props);
-      }
-      return new window.deck.SolidPolygonLayer(props);
+      var fill = new window.deck.SolidPolygonLayer(props);
+      // as PolygonLayer, no ground outlines under extruded cells
+      if (!stroked || x.extruded) return fill;
+      var lineProps = {
+        id: layerId + "-outline",
+        data: {
+          length: geom.n,
+          startIndices: geom.starts,
+          attributes: { getPath: { value: geom.positions, size: 2 } }
+        },
+        _pathType: "loop",
+        positionFormat: "XY",
+        opacity: ctx.getOpacity(),
+        pickable: false,
+        getColor: x.line_color || [0, 0, 0, 0],
+        getWidth: x.line_width || 1,
+        widthUnits: "pixels"
+      };
+      for (var e in extra) lineProps[e] = extra[e];
+      return [fill, new window.deck.PathLayer(lineProps)];
     }
 
     // Geometry for one tile, cached until more of its row groups land.
@@ -756,7 +776,7 @@
     function flushDirtyTiles(lod) {
       var set = dirtyTiles.get(lod);
       if (!set || set.size === 0) return;
-      var m = layerMemo.get("a5-lazy-tiles-lod" + lod + "-v" + loadVersion);
+      var m = layerMemo.get(currentTilesId.get(lod));
       var tileset = m && m.layer.state && m.layer.state.tileset;
       if (!tileset) {
         // deck hasn't applied the layer yet (state moves to the new
@@ -795,7 +815,7 @@
     function flushDirtyTiles(lod) {
       var set = dirtyTiles.get(lod);
       if (!set || set.size === 0) return;
-      var m = layerMemo.get("a5-lazy-tiles-lod" + lod + "-v" + loadVersion);
+      var m = layerMemo.get(currentTilesId.get(lod));
       var tileset = m && m.layer.state && m.layer.state.tileset;
       if (!tileset) return; // deck hasn't applied the layer yet; retried on next build
       var released = 0;
@@ -860,7 +880,10 @@
         TilesetClass = makeTilesetClass(lod, bboxByLod.get(lod));
         tilesetClassesByLod.set(lod, { cls: TilesetClass, ver: ver });
       }
-      var layerId = "a5-lazy-tiles-lod" + lod + "-v" + ver;
+      // stroked and unstroked tiles are different layer classes (see
+      // buildGeomLayer), so a change of stroke starts a fresh TileLayer
+      var layerId = "a5-lazy-tiles-lod" + lod + (stroked ? "-stroked" : "") + "-v" + ver;
+      currentTilesId.set(lod, layerId);
       return memoLayer(layerId, styleKey(x, stroked), function () {
         return new window.deck.TileLayer({
           id: layerId,
