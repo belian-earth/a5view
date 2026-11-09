@@ -53,6 +53,10 @@
 * Pyramids written by a5pyramid from 2026-11-09, which name the index's
   `tiles` and `tile_bbox` (were `row_groups` and `row_group_bbox`), draw
   again; files with the old names still draw.
+* Returning to a level of detail drawn earlier no longer fails with "deck:
+  initialization of TileLayer(...): deck.gl: assertion failed" and draws
+  nothing at that level. The renderer handed deck.gl a layer instance it
+  had already finalised; it now builds a fresh one.
 * Internals: the lazy renderer reads the a5pyramid index and draws every
   level as tiles, one per row group or record batch, decoding the tiles of
   levels of up to 10,000 cells as soon as the pyramid opens. It reads

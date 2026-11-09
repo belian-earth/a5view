@@ -1140,7 +1140,19 @@
     // Layer(s) for the current viewport. While the LOD just switched to
     // is still cold, the previous warm LOD is stacked underneath so the
     // crossover is visible rather than a blank flash.
+    //
+    // deck.gl finalises every layer missing from the list it is given,
+    // and a finalised instance cannot be initialised again ("assertion
+    // failed"). So memoised layers live only while they are drawn: an
+    // LOD left and later returned to gets a fresh TileLayer.
     function buildLodLayer(x, viewport) {
+      var out = buildLodLayers(x, viewport);
+      var drawn = new Set([].concat(out || []).map(function (l) { return l.id; }));
+      layerMemo.forEach(function (m, id) { if (!drawn.has(id)) layerMemo.delete(id); });
+      return out;
+    }
+
+    function buildLodLayers(x, viewport) {
       if (!ready || !rgIndex || !window.A5) return null;
       var schedule = x.lod_resolutions || null;
       if (!schedule || schedule.length === 0) return null;
