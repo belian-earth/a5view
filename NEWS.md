@@ -53,6 +53,14 @@
 * Pyramids written by a5pyramid from 2026-11-09, which name the index's
   `tiles` and `tile_bbox` (were `row_groups` and `row_group_bbox`), draw
   again; files with the old names still draw.
+* Zooming across levels of detail no longer blanks the map for a moment.
+  The new level's tiles are built undrawn and replace the old level in a
+  single frame once every tile in view is ready, so two translucent levels
+  are never drawn over each other. The same applies when cell outlines
+  appear or disappear as cells grow or shrink on screen. A level still
+  incomplete after 1.5 s is drawn anyway.
+* Changing the opacity no longer rebuilds every pyramid tile: the new
+  opacity is applied to the tiles' existing layers.
 * Returning to a level of detail drawn earlier no longer fails with "deck:
   initialization of TileLayer(...): deck.gl: assertion failed" and draws
   nothing at that level. The renderer handed deck.gl a layer instance it

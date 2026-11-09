@@ -51,6 +51,9 @@
 //     cells are big enough on screen to show a border (see
 //     buildGeomLayer). A change of stroke starts a fresh TileLayer, so
 //     tiles are rebuilt with or without outlines.
+//   - On a LOD change the new level's tiles are built undrawn and swapped
+//     in once complete; opacity reaches built tiles without a rebuild
+//     (see tileLayerClass and buildLodLayers).
 //
 // Dependencies:
 //   - window.A5ViewHyparquetReady / A5ViewHyparquetUrl / A5ViewHyparquetCdn
@@ -58,7 +61,7 @@
 //   - window.Arrow (Arrow JS, attached by geoarrowWidget)
 //   - window.A5Ready / window.A5ViewA5Url (set by lib/a5-js/bridge.js)
 //   - window.A5View.tiling: getViewportBbox, bboxKey, getA5Resolution,
-//     pickLod, bigintToHex, REBUILD_THROTTLE_MS, MIN_HOLD_MS.
+//     pickLod, bigintToHex, REBUILD_THROTTLE_MS, MAX_HOLD_MS.
 //
 // ctx (provided by a5view.js):
 //   getOpacity()    current layer opacity
@@ -680,7 +683,6 @@
     var tileGeomCache = new Map();  // lod -> Map<tileHex, { count, geom }>
     var tilesetClassesByLod = new Map();
     var layerMemo = new Map();      // layerId -> { key, layer }
-    var currentTilesId = new Map(); // lod -> id of its current TileLayer
     var dirtyTiles = new Map();     // lod -> Set<tileHex>
     // Hover lookup: lod -> { index: Map<hex, [rg, i]>, pending: [rg, ...] }
     var rowsByLod = new Map();
@@ -688,10 +690,17 @@
     var MAX_CONCURRENT_DECODES = 8;
     var decodeQueue = [];
 
-    var lastBuiltLod = null;
-    var prevWarmLod = null;
-    var lodChangedAt = 0;
+    // Level changes (see buildLodLayers): `shownId` is the TileLayer drawn,
+    // at LOD `shownLod`; a newly wanted TileLayer (a new LOD, or the same
+    // LOD with or without outlines) is `pendingId` while it builds its
+    // tiles undrawn, since `pendingSince`.
+    var shownId = null;
+    var shownLod = null;
+    var pendingId = null;
+    var pendingSince = null;
     var holdTimer = null;
+    var lastOpacity = null;
+    var builtTiles = new Map();     // TileLayer id -> Set<tileHex> with sub-layers
 
     var nowMs = (typeof performance !== "undefined" && performance.now)
       ? function () { return performance.now(); }
@@ -709,12 +718,14 @@
       tileGeomCache = new Map();
       tilesetClassesByLod = new Map();
       layerMemo = new Map();
-      currentTilesId = new Map();
       dirtyTiles = new Map();
       rowsByLod = new Map();
-      lastBuiltLod = null;
-      prevWarmLod = null;
-      lodChangedAt = 0;
+      shownId = null;
+      shownLod = null;
+      pendingId = null;
+      pendingSince = null;
+      lastOpacity = null;
+      builtTiles = new Map();
       if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
       if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
       ready = false;
@@ -848,8 +859,11 @@
       return edgeM / mPerPx;
     }
 
+    // Everything a TileLayer's tiles are built from. deck.gl rebuilds every
+    // tile of a TileLayer whose props change, so opacity is left out: it
+    // reaches the tiles' layers by clone (see tileLayerClass()).
     function styleKey(x, stroked) {
-      return [ctx.getOpacity(), ctx.getBeforeId(), stroked, x.line_width,
+      return [ctx.getBeforeId(), stroked, x.line_width,
               x.extruded, x.elevation_scale, x.fill_per_cell].join("|");
     }
 
@@ -962,7 +976,7 @@
       var set = dirtyTiles.get(lod);
       if (!set) { set = new Set(); dirtyTiles.set(lod, set); }
       set.add(hex);
-      if (ctx.onDataReady) ctx.onDataReady();
+      scheduleRetry(0);
     }
     // Retries always go through a timer: a flush can be requested from
     // inside deck's own render pass (renderSubLayers), and re-entering
@@ -975,63 +989,46 @@
         if (ctx.onDataReady) ctx.onDataReady();
       }, delay);
     }
+    // Release a LOD's dirty tiles in each of its TileLayers (with and
+    // without outlines, which coexist while one replaces the other).
     function flushDirtyTiles(lod) {
       var set = dirtyTiles.get(lod);
       if (!set || set.size === 0) return;
-      var m = layerMemo.get(currentTilesId.get(lod));
-      var tileset = m && m.layer.state && m.layer.state.tileset;
-      if (!tileset) {
-        // deck hasn't applied the layer yet (state moves to the new
-        // instance on its next update); try again shortly.
-        scheduleRetry(50);
+      var layers = [];
+      layerMemo.forEach(function (m) {
+        var l = m.layer;
+        if (l.props.a5Lod === lod && l.state && l.state.tileset) layers.push(l);
+      });
+      if (layers.length === 0) {
+        // No tiles built at this LOD: its next TileLayer builds them from
+        // the decoded data as it is then.
+        dirtyTiles.delete(lod);
         return;
       }
-      var released = 0;
-      var tiles = tileset.tiles || tileset._tiles || [];
       var present = new Set();
-      for (var i = 0; i < tiles.length; i++) {
-        var t = tiles[i];
-        if (!t.index || !set.has(t.index.i)) continue;
-        present.add(t.index.i);
-        if (released < MAX_TILES_PER_FLUSH) {
-          t.layers = null;
-          set.delete(t.index.i);
-          released++;
+      var released = new Set();
+      layers.forEach(function (l) {
+        var n = 0;
+        var tiles = l.state.tileset.tiles || l.state.tileset._tiles || [];
+        for (var i = 0; i < tiles.length; i++) {
+          var t = tiles[i];
+          if (!t.index || !set.has(t.index.i)) continue;
+          present.add(t.index.i);
+          if (released.size < MAX_TILES_PER_FLUSH || released.has(t.index.i)) {
+            t.layers = null;
+            released.add(t.index.i);
+            n++;
+          }
         }
-      }
-      // Tiles no longer in the tileset were evicted; they get a fresh
+        if (n > 0 && typeof l.setNeedsUpdate === "function") l.setNeedsUpdate();
+      });
+      // Tiles no longer in a tileset were evicted; they get a fresh
       // renderSubLayers call if they come back.
-      set.forEach(function (hex) { if (!present.has(hex)) set.delete(hex); });
-      if (released > 0 && typeof m.layer.setNeedsUpdate === "function") m.layer.setNeedsUpdate();
+      set.forEach(function (hex) { if (released.has(hex) || !present.has(hex)) set.delete(hex); });
       if (set.size > 0) scheduleRetry(16);
     }
     function flushAllDirtyTiles() {
       dirtyTiles.forEach(function (set, lod) { if (set.size > 0) flushDirtyTiles(lod); });
-    }
-    function deferTile(lod, hex) {
-      var set = dirtyTiles.get(lod);
-      if (!set) { set = new Set(); dirtyTiles.set(lod, set); }
-      set.add(hex);
-      scheduleRetry(0);
-    }
-    function flushDirtyTiles(lod) {
-      var set = dirtyTiles.get(lod);
-      if (!set || set.size === 0) return;
-      var m = layerMemo.get(currentTilesId.get(lod));
-      var tileset = m && m.layer.state && m.layer.state.tileset;
-      if (!tileset) return; // deck hasn't applied the layer yet; retried on next build
-      var released = 0;
-      var tiles = tileset.tiles || tileset._tiles || [];
-      for (var i = 0; i < tiles.length && released < MAX_TILES_PER_FLUSH; i++) {
-        var t = tiles[i];
-        if (t.index && set.has(t.index.i)) {
-          t.layers = null;
-          set.delete(t.index.i);
-          released++;
-        }
-      }
-      if (released > 0 && typeof m.layer.setNeedsUpdate === "function") m.layer.setNeedsUpdate();
-      if (set.size > 0 && ctx.onDataReady) ctx.onDataReady();
     }
 
     // Tileset2D over the data-bearing tiles of one LOD: atomic tiles,
@@ -1072,6 +1069,50 @@
       };
     }
 
+    // deck.gl's TileLayer with two hooks, read when deck updates or draws,
+    // so neither changes the TileLayer's props (which would rebuild every
+    // tile):
+    //   - getSubLayerPropsByTile() hands the current opacity to each
+    //     tile's cached layers, which deck clones when it differs, so an
+    //     opacity change neither rebuilds tiles nor re-tessellates cells;
+    //   - filterSubLayer() draws one TileLayer per frame: the pending one
+    //     once every tile it selected for the viewport is built, else the
+    //     shown one. It runs after deck has built the frame's tiles, so the
+    //     swap happens in the first frame the new layer is complete.
+    var TileLayerClass = null;
+    function tileLayerClass() {
+      if (TileLayerClass) return TileLayerClass;
+      TileLayerClass = class extends window.deck.TileLayer {
+        getSubLayerPropsByTile() { return { opacity: ctx.getOpacity() }; }
+        filterSubLayer(context) {
+          var draw = false;
+          if (this.id === pendingId) draw = layerReady(this);
+          else if (this.id === shownId) draw = pendingId == null || !pendingReady();
+          return draw && super.filterSubLayer(context);
+        }
+      };
+      TileLayerClass.layerName = "A5ViewTileLayer";
+      return TileLayerClass;
+    }
+
+    // Whether every tile a TileLayer selected for the viewport has its
+    // sub-layers built.
+    function layerReady(layer) {
+      var tileset = layer && layer.state && layer.state.tileset;
+      var selected = tileset && tileset.selectedTiles;
+      if (!selected) return false;
+      var built = builtTiles.get(layer.id);
+      for (var i = 0; i < selected.length; i++) {
+        if (!built || !built.has(selected[i].index.i)) return false;
+      }
+      return true;
+    }
+
+    function pendingReady() {
+      var m = pendingId != null && layerMemo.get(pendingId);
+      return !!m && layerReady(m.layer);
+    }
+
     function buildTiledLayer(x, lod, byTile, stroked) {
       var ver = loadVersion;
       var entry = tilesetClassesByLod.get(lod);
@@ -1085,14 +1126,16 @@
       // stroked and unstroked tiles are different layer classes (see
       // buildGeomLayer), so a change of stroke starts a fresh TileLayer
       var layerId = "a5-lazy-tiles-lod" + lod + (stroked ? "-stroked" : "") + "-v" + ver;
-      currentTilesId.set(lod, layerId);
       return memoLayer(layerId, styleKey(x, stroked), function () {
-        return new window.deck.TileLayer({
+        var built = new Set();
+        builtTiles.set(layerId, built);
+        var TileLayer = tileLayerClass();
+        return new TileLayer({
           id: layerId,
+          a5Lod: lod,
           data: EMPTY_DATA,
           TilesetClass: TilesetClass,
           extent: [-180, -85.05, 180, 85.05],
-          opacity: ctx.getOpacity(),
           pickable: false,
           beforeId: ctx.getBeforeId(),
           getTileData: function (props) {
@@ -1109,9 +1152,16 @@
             if (!rgs || rgs.length === 0) return null;
             var hex = props.tile.index.i;
             var geom = tileGeometry(lod, hex, rgs);
-            if (!geom || geom.n === 0) return null;
-            if (!withinBuildBudget()) { deferTile(lod, hex); return null; }
-            return buildGeomLayer(x, geom, "a5-lazy-lod" + lod + "-tile-" + hex, stroked, {});
+            if (!geom) { built.delete(hex); return null; }
+            if (geom.n === 0) { built.add(hex); return null; }
+            if (!withinBuildBudget()) { built.delete(hex); deferTile(lod, hex); return null; }
+            built.add(hex);
+            // the pending layer may now be complete; check after this pass
+            if (layerId === pendingId) scheduleRetry(16);
+            // ids are unique across TileLayers: deck matches layers by id
+            // over the whole tree, and two TileLayers of one LOD coexist
+            // while one replaces the other
+            return buildGeomLayer(x, geom, layerId + "-tile-" + hex, stroked, {});
           }
         });
       });
@@ -1124,39 +1174,45 @@
       return null;
     }
 
-    function lodHasDecodedData(lod) {
-      var byTile = tilesByLod.get(lod);
-      if (!byTile) return false;
-      var found = false;
-      byTile.forEach(function (rgs) {
-        if (found) return;
-        for (var j = 0; j < rgs.length; j++) {
-          if (decodedCache.has(rgs[j])) { found = true; return; }
-        }
-      });
-      return found;
+    // Longest a LOD change waits for the new level's tiles before drawing
+    // it anyway, so a tile that never builds cannot hold the old level.
+    function getMaxHoldMs() {
+      var v = TILING.MAX_HOLD_MS;
+      return (typeof v === "number" && v >= 0) ? v : 1500;
     }
 
-    function getMinHoldMs() {
-      var v = TILING.MIN_HOLD_MS;
-      return (typeof v === "number" && v >= 0) ? v : 200;
-    }
-
-    // Layer(s) for the current viewport. While the LOD just switched to
-    // is still cold, the previous warm LOD is stacked underneath so the
-    // crossover is visible rather than a blank flash.
+    // Layer(s) for the current viewport.
     //
     // deck.gl finalises every layer missing from the list it is given,
     // and a finalised instance cannot be initialised again ("assertion
-    // failed"). So memoised layers live only while they are drawn: an
-    // LOD left and later returned to gets a fresh TileLayer.
+    // failed"). So memoised layers live only while they are in the list:
+    // an LOD left and later returned to gets a fresh TileLayer.
     function buildLodLayer(x, viewport) {
       var out = buildLodLayers(x, viewport);
-      var drawn = new Set([].concat(out || []).map(function (l) { return l.id; }));
-      layerMemo.forEach(function (m, id) { if (!drawn.has(id)) layerMemo.delete(id); });
+      var listed = new Set([].concat(out || []).map(function (l) { return l.id; }));
+      layerMemo.forEach(function (m, id) {
+        if (!listed.has(id)) { layerMemo.delete(id); builtTiles.delete(id); }
+      });
+      // a new opacity reaches the cached tile layers on their next update
+      var opacity = ctx.getOpacity();
+      if (opacity !== lastOpacity) {
+        lastOpacity = opacity;
+        layerMemo.forEach(function (m) {
+          if (m.layer.internalState && typeof m.layer.setNeedsUpdate === "function") m.layer.setNeedsUpdate();
+        });
+      }
       return out;
     }
 
+    // When the TileLayer for the viewport changes (a new LOD, or outlines
+    // appearing or going as cells grow or shrink on screen), the one drawn
+    // so far stays until the new one has built every tile in view: both
+    // are listed, so deck builds the new one's tiles, and filterSubLayer()
+    // draws exactly one of the two in each frame. So a change neither
+    // blanks the map nor draws two translucent levels over each other.
+    // Once the new layer is complete it becomes the shown one and the old
+    // is dropped. A layer still incomplete after MAX_HOLD_MS is shown
+    // anyway.
     function buildLodLayers(x, viewport) {
       if (!ready || !rgIndex || !window.A5) return null;
       var schedule = x.lod_resolutions || null;
@@ -1166,33 +1222,41 @@
       var R = TILING.getA5Resolution(viewport);
       var lod = TILING.pickLod(R, schedule);
       if (lod == null) return null;
-      if (lod !== lastBuiltLod) {
-        log("[a5view] lod=" + lod + " (R=" + R + ", zoom=" + (viewport.zoom || 0).toFixed(2) + ")");
-        lastBuiltLod = lod;
-        lodChangedAt = nowMs();
+
+      var current = buildLayerAtLod(x, lod, viewport);
+      var shown = shownId != null && layerMemo.get(shownId);
+      if (current == null || !shown || current.id === shownId) {
+        settle(current, R, viewport);
+        return current;
+      }
+      if (current.id !== pendingId) {
+        log("[a5view] " + shownId + " -> " + current.id + " pending (R=" + R + ", zoom=" + (viewport.zoom || 0).toFixed(2) + ")");
+        pendingId = current.id;
+        pendingSince = nowMs();
         if (holdTimer) clearTimeout(holdTimer);
         holdTimer = setTimeout(function () {
           holdTimer = null;
           if (ctx.onDataReady) ctx.onDataReady();
-        }, getMinHoldMs() + 32);
+        }, getMaxHoldMs() + 32);
       }
-
-      var current = buildLayerAtLod(x, lod, viewport);
-      if (current == null) return null;
-
-      var holdElapsed = (nowMs() - lodChangedAt) >= getMinHoldMs();
-      if (lodHasDecodedData(lod) && holdElapsed) {
-        prevWarmLod = lod;
+      if (layerReady(current) || nowMs() - pendingSince >= getMaxHoldMs()) {
+        settle(current, R, viewport);
         return current;
       }
-      // Skip the stacked hold at non-solid opacity: two LODs composited
-      // read visibly denser than the single layer the user expects.
-      if (ctx.getOpacity() < 1 - 1e-6) return current;
-      if (prevWarmLod != null && prevWarmLod !== lod) {
-        var prev = buildLayerAtLod(x, prevWarmLod, viewport);
-        if (prev) return [prev, current];
+      return [shown.layer, current];
+    }
+
+    // Draw `layer` (a TileLayer, or null) from now on.
+    function settle(layer, R, viewport) {
+      var lod = layer ? layer.props.a5Lod : null;
+      if (lod !== shownLod) {
+        log("[a5view] lod=" + lod + " (R=" + R + ", zoom=" + (viewport.zoom || 0).toFixed(2) + ")");
       }
-      return current;
+      shownId = layer ? layer.id : null;
+      shownLod = lod;
+      pendingId = null;
+      pendingSince = null;
+      if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
     }
 
     // Decoded row at a LOD for a hex cell id, or null. The per-LOD hex
@@ -1223,12 +1287,19 @@
       reset: reset,
       buildLodLayer: buildLodLayer,
       findRow: findRow,
-      currentLod: function () { return lastBuiltLod; },
+      // the LOD drawn, which hover looks cells up in
+      currentLod: function () { return shownLod; },
+      pendingLod: function () {
+        var m = pendingId != null && layerMemo.get(pendingId);
+        return m ? m.layer.props.a5Lod : null;
+      },
       isReady: function () { return ready; },
       stats: function () {
         return {
           loadVersion: loadVersion,
           format: sourceFormat,
+          shownId: shownId,
+          pendingId: pendingId,
           rowGroups: rgIndex ? rgIndex.length : 0,
           decoded: decodedCache.size,
           pending: pendingDecodes.size,
