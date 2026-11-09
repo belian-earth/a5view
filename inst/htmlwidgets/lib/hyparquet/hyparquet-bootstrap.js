@@ -3,6 +3,9 @@
 // window.A5ViewHyparquetReady before calling parquet APIs.
 (function () {
   if (window.A5ViewHyparquetReady) return;
+  // The vendored hyparquet.esm.js is jsDelivr's bundle of this version;
+  // the yaml's dependency version matches.
+  var HYPARQUET_VERSION = "1.33.0";
   var scripts = document.getElementsByTagName("script");
   var base = "./";
   for (var i = scripts.length - 1; i >= 0; i--) {
@@ -17,11 +20,12 @@
   // interactive viewer + non-selfcontained saveWidget).
   // Fallback: jsdelivr CDN bundle (selfcontained HTML where the
   // sibling file is unreachable). Same version as the vendored copy.
-  // Absolute URL the tile worker imports from (same file, own thread).
+  // Absolute URLs the tile worker imports from (same files, own thread).
   window.A5ViewHyparquetUrl = new URL(base + "hyparquet.esm.js", window.location.href).href;
+  window.A5ViewHyparquetCdn = "https://cdn.jsdelivr.net/npm/hyparquet@" + HYPARQUET_VERSION + "/+esm";
   window.A5ViewHyparquetReady = import(base + "hyparquet.esm.js")
     .catch(function () {
-      return import("https://cdn.jsdelivr.net/npm/hyparquet@1.25.6/+esm");
+      return import(window.A5ViewHyparquetCdn);
     })
     .then(function (mod) {
       window.hyparquet = mod;

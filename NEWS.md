@@ -67,6 +67,11 @@
 
 ## Other changes
 
+* deck.gl 9.4.1 (was 9.4.0), with fixes to MapLibre interleaving and the
+  globe, and the vendored hyparquet 1.33.0 (was 1.25.6). deck.gl 9.4
+  still bundles a5-js 0.10, so a5view keeps drawing `A5Layer` boundaries
+  with its own a5-js 1.0 until deck.gl v10.
+
 * `geom_a5()` no longer warns "`closed` was renamed `closed_ring`" with
   a5R 1.0.0: it relies on `a5_cell_to_boundary_xy()`'s open-ring default
   instead of naming the argument.

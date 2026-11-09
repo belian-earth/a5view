@@ -134,3 +134,27 @@ test_that("every pyramid source decodes to the same tiles", {
   # served Arrow fetched each tile once, for both sources that use it
   expect_identical(out$requests, 2L * n_tiles)
 })
+
+test_that("hyparquet's version is declared once and matches the bundle and the yaml", {
+  boot <- readLines(lib_file("hyparquet", "hyparquet-bootstrap.js"))
+  ver <- sub('.*HYPARQUET_VERSION = "([^"]+)".*', "\\1",
+             grep("var HYPARQUET_VERSION =", boot, value = TRUE))
+  expect_length(ver, 1L)
+
+  # the vendored file is jsDelivr's bundle of that version
+  header <- readLines(lib_file("hyparquet", "hyparquet.esm.js"), n = 5L)
+  expect_true(any(grepl(paste0("/npm/hyparquet@", ver, "/"), header, fixed = TRUE)))
+
+  yaml <- readLines(system.file("htmlwidgets", "a5view.yaml", package = "a5view"))
+  i <- grep("name: hyparquet", yaml, fixed = TRUE)
+  expect_identical(trimws(sub("version:", "", yaml[i + 1L])), ver)
+
+  # No other script hard-codes a hyparquet version.
+  js_files <- list.files(
+    system.file("htmlwidgets", package = "a5view"),
+    pattern = "\\.js$", recursive = TRUE, full.names = TRUE
+  )
+  js_files <- js_files[!basename(js_files) %in% c("hyparquet.esm.js", "hyparquet-bootstrap.js")]
+  hits <- unlist(lapply(js_files, function(f) grep("hyparquet@", readLines(f, warn = FALSE), value = TRUE)))
+  expect_length(hits, 0L)
+})

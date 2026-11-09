@@ -53,8 +53,8 @@
 //     tiles are rebuilt with or without outlines.
 //
 // Dependencies:
-//   - window.A5ViewHyparquetReady / window.A5ViewHyparquetUrl (set by
-//     lib/hyparquet/hyparquet-bootstrap.js)
+//   - window.A5ViewHyparquetReady / A5ViewHyparquetUrl / A5ViewHyparquetCdn
+//     (set by lib/hyparquet/hyparquet-bootstrap.js)
 //   - window.Arrow (Arrow JS, attached by geoarrowWidget)
 //   - window.A5Ready / window.A5ViewA5Url (set by lib/a5-js/bridge.js)
 //   - window.A5View.tiling: getViewportBbox, bboxKey, getA5Resolution,
@@ -592,7 +592,7 @@
     if (window.A5ViewA5Cdn) a5.push(window.A5ViewA5Cdn);
     var hyp = [];
     if (window.A5ViewHyparquetUrl) hyp.push(window.A5ViewHyparquetUrl);
-    hyp.push("https://cdn.jsdelivr.net/npm/hyparquet@1.25.6/+esm");
+    if (window.A5ViewHyparquetCdn) hyp.push(window.A5ViewHyparquetCdn);
     var arrow = [];
     var scripts = document.getElementsByTagName("script");
     for (var i = 0; i < scripts.length; i++) {
