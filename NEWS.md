@@ -41,6 +41,9 @@
   the outline state.
 * A `lod_step` reaching below LOD 2 no longer errors ("wrong sign in 'by'
   argument"); the pyramid then holds the data resolution only.
+* Pyramids written by a5pyramid from 2026-11-09, which name the index's
+  `tiles` and `tile_bbox` (were `row_groups` and `row_group_bbox`), draw
+  again; files with the old names still draw.
 * Internals: the lazy renderer reads the a5pyramid index and draws every
   level as tiles, one per row group, decoding the row groups of levels of
   up to 10,000 cells as soon as the file opens. The `a5view-tiling`

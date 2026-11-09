@@ -12,9 +12,11 @@
 //   - Row groups follow the levels in ascending LOD order; each row group
 //     holds one level and is one tile, a run of consecutive cell ids.
 //   - Schema KV metadata key `a5pyramid` holds the JSON index: `levels`
-//     (each `{lod, rows, row_groups: [start, end)}`) and `row_group_bbox`,
-//     `[west, south, east, north]` per row group, flat. `west > east`
-//     means the box crosses the antimeridian.
+//     (each `{lod, rows, tiles: [start, end)}`) and `tile_bbox`,
+//     `[west, south, east, north]` per tile, flat. Tile i is row group i.
+//     `west > east` means the box crosses the antimeridian. Files written
+//     before 2026-11-09 name these `row_groups` and `row_group_bbox`;
+//     both are read.
 //   - KV `a5_index` records the A5 index version of the cell ids.
 //   - Columns `cell` (uint64), `lod`, `ncell`, then the payload columns
 //     `_fill_r/g/b/a`, `_fill_value`, `_elevation` as present.
@@ -544,10 +546,13 @@
         // { rg, lod_min, lod_max, west, south, east, north, tile_id, eager }.
         // Each row group is its own tile.
         rgIndex = [];
-        var boxes = index.row_group_bbox;
+        // a5pyramid renamed `row_groups` / `row_group_bbox` to `tiles` /
+        // `tile_bbox` on 2026-11-09; read either.
+        var boxes = index.tile_bbox || index.row_group_bbox;
         index.levels.forEach(function (level) {
           var eager = level.rows <= TILING.EAGER_MAX_ROWS;
-          for (var rg = level.row_groups[0]; rg < level.row_groups[1]; rg++) {
+          var range = level.tiles || level.row_groups;
+          for (var rg = range[0]; rg < range[1]; rg++) {
             rgIndex.push({
               rg: rg, lod_min: level.lod, lod_max: level.lod,
               west: boxes[4 * rg], south: boxes[4 * rg + 1],
