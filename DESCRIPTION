@@ -44,7 +44,7 @@ Suggests:
     withr,
     wk
 Remotes:
-    belian-earth/a5pyramid@arrow-tiles,
+    belian-earth/a5pyramid,
     belian-earth/a5R,
     r-spatial/geoarrowWidget
 Config/testthat/edition: 3
