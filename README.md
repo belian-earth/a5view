@@ -147,8 +147,9 @@ a5_build_pyramid(cells, "cells.parquet", fill = value, aggregate = "mean")
 a5_view_pyramid("cells.parquet")
 ```
 
-Inside Shiny the parquet file is served with HTTP range requests, so
-only the row groups in view are transferred.
+Inside Shiny only the tiles in view are transferred: `a5_view()` serves
+its pyramid’s tiles from memory, and `a5_view_pyramid()` reads the file
+with HTTP range requests.
 
 ## Shiny
 

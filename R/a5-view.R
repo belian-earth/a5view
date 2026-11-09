@@ -93,14 +93,14 @@
 #'   - `"mean"`: each numeric payload column is averaged independently
 #'     within the parent group. Best for scalar fields; blends colours
 #'     in RGB space, which can mute embedding visualisations.
-#'   When set to `"rep_child"` or `"mean"`, the pyramid is built and
-#'   written to parquet by [a5pyramid::a5_write_pyramid()], with a
-#'   spatial row-group index (see [a5_build_pyramid()]). The browser decodes only
-#'   the row groups intersecting the viewport at the level of detail
-#'   matching the current zoom. Inside Shiny the parquet file is served
-#'   over HTTP with byte-range support, so only the footer and the
-#'   visible row groups are ever transferred; elsewhere it is embedded
-#'   in the widget as base64.
+#'   When set to `"rep_child"` or `"mean"`, the pyramid is built in
+#'   memory by [a5pyramid::a5_pyramid_arrow()] as Arrow tiles of nearby
+#'   cells, with a spatial index (see [a5_build_pyramid()] to save one to
+#'   a file). The browser decodes only the tiles intersecting the
+#'   viewport at the level of detail matching the current zoom. Inside
+#'   Shiny the tiles are served over HTTP, so only the visible tiles are
+#'   ever transferred; elsewhere they are embedded in the widget,
+#'   compressed. No file is written.
 #' @param lod_step Integer >= 1, gap between successive precomputed
 #'   LODs (only used when `aggregate != "none"`). `1` (default)
 #'   precomputes every level from the data resolution down to the
@@ -267,7 +267,7 @@ a5_view_update <- function(
   tooltip_cols <- resolve_tooltip_cols(tooltip, prep, aggregate)
   data <- encode_view_data(
     prep, aggregate, lod_step, tooltip_cols,
-    session = session
+    session = session, output_id = outputId
   )
 
   msg <- c(

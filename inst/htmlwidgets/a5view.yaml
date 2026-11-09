@@ -8,9 +8,9 @@ dependencies:
     stylesheet:
       - maplibre-gl.css
   - name: deckgl
-    version: 9.4.0
+    version: 9.4.1
     src:
-      href: https://unpkg.com/deck.gl@9.4.0
+      href: https://unpkg.com/deck.gl@9.4.1
     script:
       - dist.min.js
   # a5-js 1.0.0. htmltools only takes numeric versions, so a
@@ -23,7 +23,7 @@ dependencies:
     script:
       - bridge.js
   - name: hyparquet
-    version: 1.25.6
+    version: 1.33.0
     src:
       file: htmlwidgets/lib/hyparquet
     script:

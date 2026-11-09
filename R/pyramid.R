@@ -85,7 +85,7 @@ a5_build_pyramid <- function(
 #' View a prebuilt A5 pyramid parquet file
 #'
 #' Reads a parquet file produced by [a5_build_pyramid()] and renders it
-#' through the same lazy row-group decoder as [a5_view()] does for
+#' through the same lazy tile renderer as [a5_view()] uses for
 #' aggregated data. No data preparation or LOD construction happens at
 #' view time. Inside Shiny the file is served to the browser over HTTP
 #' with byte-range support, so only the footer and the row groups in

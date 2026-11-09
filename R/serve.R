@@ -1,4 +1,4 @@
-# Serving pyramid parquet files to the browser inside Shiny
+# Serving pyramids to the browser: Parquet files and Arrow tiles
 
 #' The current Shiny session, or NULL outside Shiny
 #' @noRd
@@ -80,25 +80,104 @@ parquet_range_handler <- function(path, req) {
   )
 }
 
+#' Whether a session can serve data to the browser by URL
+#' @noRd
+can_serve <- function(session) {
+  !is.null(session) && is.function(session$registerDataObj)
+}
+
 #' Encode a parquet file for the widget: served by URL inside Shiny,
 #' inline base64 otherwise
 #'
-#' @param path Parquet file path.
+#' @param path Parquet file path. Inside Shiny it must outlive the
+#'   session's use of it.
 #' @param session Shiny session or `NULL`.
-#' @param temp Logical; when `TRUE` the file is a temp file owned by
-#'   the widget and is unlinked when the session ends (Shiny) or right
-#'   away after encoding (inline).
-#' @return List with `parquet` (either `list(url, bytes)` or
-#'   `list(b64)`).
+#' @return List with `pyramid`: `list(format = "parquet", url, bytes)`
+#'   or `list(format = "parquet", b64)`.
 #' @noRd
-parquet_payload <- function(path, session = NULL, temp = FALSE) {
-  if (!is.null(session) && is.function(session$registerDataObj)) {
-    if (temp && is.function(session$onSessionEnded)) {
-      session$onSessionEnded(function() unlink(path))
-    }
-    return(list(parquet = serve_parquet_file(session, path)))
+parquet_payload <- function(path, session = NULL) {
+  if (can_serve(session)) {
+    served <- serve_parquet_file(session, path)
+    return(list(pyramid = c(list(format = "parquet"), served)))
   }
-  if (temp) on.exit(unlink(path), add = TRUE)
   bytes <- readBin(path, "raw", n = file.info(path)$size)
-  list(parquet = list(b64 = base64enc::base64encode(bytes)))
+  list(pyramid = list(format = "parquet", b64 = base64enc::base64encode(bytes)))
+}
+
+#' Encode an a5pyramid Arrow table for the widget
+#'
+#' Outside Shiny the table is one Arrow IPC stream, deflated and inlined
+#' as base64; the browser reads the index from its schema metadata. Inside
+#' Shiny each tile is its own deflated IPC stream, without the schema
+#' metadata, held with the session and served one tile per request
+#' (`&tile=<i>`, from 0); the index travels in the payload. Deflate here
+#' is `memCompress(type = "gzip")`, the zlib format (RFC 1950) that the
+#' browser's `DecompressionStream("deflate")` reads.
+#'
+#' The tiles are registered under the output's id, so a later pyramid for
+#' the same output replaces them and the old ones are released.
+#'
+#' @param tbl Table from `pyramid_arrow()`.
+#' @param session Shiny session or `NULL`.
+#' @param output_id Shiny output id, or `NULL` to look it up.
+#' @return `list(format = "arrow", b64)` or `list(format = "arrow", url,
+#'   tiles, index, a5_index)`, where `index` is the index JSON.
+#' @noRd
+arrow_pyramid_payload <- function(tbl, session = NULL, output_id = NULL) {
+  if (!can_serve(session)) {
+    ipc <- arrow::write_to_raw(tbl, format = "stream")
+    return(list(
+      format = "arrow",
+      b64 = base64enc::base64encode(memCompress(ipc, "gzip"))
+    ))
+  }
+  meta <- tbl$metadata
+  bare <- tbl$ReplaceSchemaMetadata(structure(list(), names = character()))
+  tiles <- lapply(arrow::as_record_batch_reader(bare)$batches(), function(b) {
+    memCompress(arrow::write_to_raw(b, format = "stream"), "gzip")
+  })
+  if (is.null(output_id)) output_id <- current_output_id(session)
+  key <- if (is.null(output_id)) substr(rlang::hash(tiles), 1, 12) else output_id
+  url <- session$registerDataObj(paste0("a5view-tiles-", key), tiles, arrow_tile_handler)
+  list(
+    format = "arrow",
+    url = url,
+    tiles = length(tiles),
+    index = meta$a5pyramid,
+    a5_index = meta$a5_index
+  )
+}
+
+#' The id of the Shiny output being rendered, or `NULL`
+#' @noRd
+current_output_id <- function(session) {
+  if (!rlang::is_installed("shiny")) return(NULL)
+  info <- tryCatch(
+    shiny::getCurrentOutputInfo(session = session),
+    error = function(e) NULL
+  )
+  info$name
+}
+
+#' Shiny data-object handler serving one deflated Arrow tile
+#'
+#' @param tiles The registered data: a list of raw vectors, tile `i` at
+#'   `tiles[[i + 1]]`.
+#' @param req Rook request environment; `QUERY_STRING` holds `tile=<i>`.
+#' @return A [shiny::httpResponse()].
+#' @noRd
+arrow_tile_handler <- function(tiles, req) {
+  query <- shiny::parseQueryString(paste0("", req[["QUERY_STRING"]]))
+  i <- suppressWarnings(as.integer(query$tile))
+  if (length(i) != 1L || is.na(i) || i < 0L || i >= length(tiles)) {
+    return(shiny::httpResponse(404L, "text/plain", "No such tile"))
+  }
+  bytes <- tiles[[i + 1L]]
+  shiny::httpResponse(
+    200L, "application/octet-stream", bytes,
+    list(
+      "Cache-Control" = "private, max-age=3600",
+      "Content-Length" = as.character(length(bytes))
+    )
+  )
 }

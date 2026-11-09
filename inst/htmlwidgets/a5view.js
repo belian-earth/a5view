@@ -266,13 +266,13 @@ HTMLWidgets.widget({
     function resolveHover(coord) {
       if (!coord || !window.A5 || !lastPayload) return null;
       var x = lastPayload;
-      var resList = x.parquet ? [lazyRenderer.currentLod()] : [].concat(x.data_resolution);
+      var resList = x.pyramid ? [lazyRenderer.currentLod()] : [].concat(x.data_resolution);
       for (var i = 0; i < resList.length; i++) {
         var res = resList[i];
         if (res == null) continue;
         var cell = window.A5.lonLatToCell([coord[0], coord[1]], res);
         var hex = pentToHex(cell);
-        var row = x.parquet ? lazyRenderer.findRow(res, hex) : findLegacyRow(hex);
+        var row = x.pyramid ? lazyRenderer.findRow(res, hex) : findLegacyRow(hex);
         if (row) return { cell: cell, hex: hex, row: row };
       }
       return null;
@@ -778,7 +778,7 @@ HTMLWidgets.widget({
       return legacyLayer;
     }
 
-    // --- Data (pyramid: lazy parquet renderer) --------------------------
+    // --- Data (pyramid: lazy tile renderer) --------------------------
     var lazyRenderer = T.lazy.createRenderer({
       getOpacity: function () { return currentOpacity; },
       getBeforeId: function () { return labelLayerId || undefined; },
@@ -814,7 +814,7 @@ HTMLWidgets.widget({
 
     function buildLayers(x) {
       var layers = [];
-      if (x.parquet) {
+      if (x.pyramid) {
         var lz = lazyRenderer.buildLodLayer(x, getCurrentViewport());
         if (Array.isArray(lz)) layers = layers.concat(lz);
         else if (lz) layers.push(lz);
@@ -942,7 +942,7 @@ HTMLWidgets.widget({
         updateDebug();
         // The pyramid path is viewport-driven; the in-memory path
         // renders every row so needs no rebuild on move.
-        if (lastPayload && lastPayload.parquet) scheduleRedraw();
+        if (lastPayload && lastPayload.pyramid) scheduleRedraw();
       });
       map.on("mousemove", onHover);
       map.on("mouseout", onLeave);
@@ -967,9 +967,9 @@ HTMLWidgets.widget({
       hoveredPentagon = null;
       clickedPentagon = null;
       updateTooltip(null);
-      if (x.parquet) {
+      if (x.pyramid) {
         x.data = null;
-        lazyRenderer.init(x.parquet).then(redraw).catch(function (e) {
+        lazyRenderer.init(x.pyramid).then(redraw).catch(function (e) {
           console.error("[a5view] pyramid init failed:", e);
         });
       } else if (x.arrow_ipc && typeof Arrow !== "undefined") {
@@ -992,7 +992,7 @@ HTMLWidgets.widget({
          "tooltip_cols", "data_resolution", "lod_resolutions"].forEach(function (k) {
           if (msg[k] !== undefined) lastPayload[k] = msg[k];
         });
-        lastPayload.parquet = msg.parquet || null;
+        lastPayload.pyramid = msg.pyramid || null;
         lastPayload.arrow_ipc = msg.arrow_ipc || null;
         updateLegend(lastPayload);
         loadData(lastPayload);
