@@ -62,8 +62,10 @@
   levels of up to 10,000 cells as soon as the pyramid opens. It reads
   Parquet with hyparquet and Arrow with the page's Arrow JS, in a worker,
   falling back to the main thread when the worker cannot load its
-  libraries. The `a5view-tiling` dependency is versioned 0.3.0.9000, so
-  browsers do not reuse the old script.
+  libraries. The libraries' URLs are written into the worker when it is
+  created, so its messages carry data only. The `a5view-tiling`
+  dependency is versioned 0.3.0.9000, so browsers do not reuse the old
+  script.
 
 ## Other changes
 

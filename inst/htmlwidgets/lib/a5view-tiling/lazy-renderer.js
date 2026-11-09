@@ -442,7 +442,11 @@
   // hyparquet as ES modules, Arrow JS as a classic script), then serve
   // open / decode requests over postMessage. Runs from a Blob URL so no
   // extra file has to be shipped; it inherits the page's origin.
-  function workerMain() {
+  //
+  // `libs` (see libUrls()) is written into the worker's source when it
+  // is created, so the code the worker loads is fixed then; messages
+  // carry data only.
+  function workerMain(libs) {
     var core = null;
     var loaded = {};
     function tryImport(list) {
@@ -458,8 +462,8 @@
       }
       return self.Arrow ? Promise.resolve(self.Arrow) : Promise.reject(err);
     }
-    function lib(name, urls) {
-      if (!loaded[name]) loaded[name] = name === "arrow" ? loadArrow(urls.arrow) : tryImport(urls[name]);
+    function lib(name) {
+      if (!loaded[name]) loaded[name] = name === "arrow" ? loadArrow(libs.arrow) : tryImport(libs[name]);
       return loaded[name];
     }
     function errorMessage(e) { return String(e && e.message || e); }
@@ -468,9 +472,9 @@
       if (msg.type === "open") {
         var arrow = msg.source.format === "arrow";
         Promise.all([
-          lib("a5", msg.libs),
-          arrow ? null : lib("hyparquet", msg.libs),
-          arrow ? lib("arrow", msg.libs) : null
+          lib("a5"),
+          arrow ? null : lib("hyparquet"),
+          arrow ? lib("arrow") : null
         ]).then(function (mods) {
           core = tileCore(mods[0], mods[1], mods[2]);
           return core.open(msg.source).then(function (index) {
@@ -479,7 +483,7 @@
             self.postMessage({ type: "error", id: msg.id, message: errorMessage(e) });
           });
         }, function (e) {
-          self.postMessage({ type: "error", id: msg.id, libs: true, message: errorMessage(e) });
+          self.postMessage({ type: "error", id: msg.id, loadFailed: true, message: errorMessage(e) });
         });
       } else if (msg.type === "decode") {
         core.decode(msg.rg).then(function (out) {
@@ -493,10 +497,11 @@
     };
   }
 
-  function makeWorker() {
+  function makeWorker(libs) {
     if (typeof Worker === "undefined" || typeof Blob === "undefined") return null;
     try {
-      var src = tileCore.toString() + "\n(" + workerMain.toString() + ")();";
+      var src = tileCore.toString() + "\n(" + workerMain.toString() + ")(" +
+        JSON.stringify(libs) + ");";
       var url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
       var w = new Worker(url);
       URL.revokeObjectURL(url);
@@ -532,7 +537,7 @@
   // close(), isWorker }. A worker that cannot load its libraries hands
   // over to the main thread.
   function makeDecoder(libUrls) {
-    var worker = makeWorker();
+    var worker = makeWorker(libUrls);
     if (!worker) return inThreadDecoder();
     var pending = new Map();
     var nextId = 1;
@@ -543,7 +548,7 @@
       pending.delete(msg.id);
       if (msg.type === "error") {
         var err = new Error(msg.message);
-        err.libs = !!msg.libs;
+        err.loadFailed = !!msg.loadFailed;
         p.reject(err);
       } else {
         p.resolve(msg);
@@ -563,10 +568,10 @@
     var front = {
       isWorker: true,
       open: function (source) {
-        return send({ type: "open", source: source, libs: libUrls }).then(function (m) {
+        return send({ type: "open", source: source }).then(function (m) {
           return m.index;
         }, function (e) {
-          if (!e.libs) throw e;
+          if (!e.loadFailed) throw e;
           log("[a5view] worker could not load its libraries (" + e.message + "); decoding on main thread");
           front.close();
           var local = inThreadDecoder();
