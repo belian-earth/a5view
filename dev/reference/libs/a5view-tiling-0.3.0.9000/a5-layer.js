@@ -9,10 +9,10 @@
 // other prop are deck.gl's own. The body mirrors deck.gl's.
 //
 // Drop it, and use deck.A5Layer again, once deck.gl ships a release
-// built on a5-js >= 1.0. As of 2026-10-14 deck.gl master still pins
-// a5-js ^0.10.0 (modules/geo-layers/package.json) and there is no
-// issue or PR for 1.0; the last bump was visgl/deck.gl#10620
-// (0.7.2 -> 0.10.0).
+// built on a5-js >= 1.0. As of 2026-11-09 every 9.4 release (to 9.4.1)
+// depends on a5-js ^0.10.0. visgl/deck.gl#10912 moved master to a5-js
+// ^1.0.0 on 2026-10-26, for deck.gl v10; the 9.4.2 milestone leaves it
+// out, so the switch comes with v10.
 //
 // Callers must wait for window.A5Ready before building the layer.
 // =====================================================================

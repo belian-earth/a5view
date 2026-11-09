@@ -6,7 +6,7 @@
 
 - Pyramids are built and written by a5pyramid, a new import: a Rust
   engine that builds every level in parallel, on
-  [`a5pyramid::a5pyramid_threads()`](https://rdrr.io/pkg/a5pyramid/man/a5pyramid_threads.html)
+  [`a5pyramid::a5pyramid_threads()`](https://belian-earth.github.io/a5pyramid/reference/a5pyramid_threads.html)
   threads. On 439,276 cells with four colour channels and a fill value,
   building and writing a pyramid takes 0.5 s instead of 4.1 s, and the
   parquet file is about 30% smaller.
@@ -17,9 +17,9 @@
   take the same arguments as before.
 - **Breaking:** pyramid files are in a5pyramid’s format (its
   `FORMAT.md`), which any a5pyramid reader can open; in R,
-  [`a5pyramid::a5_pyramid_info()`](https://rdrr.io/pkg/a5pyramid/man/a5_pyramid_info.html)
+  [`a5pyramid::a5_pyramid_info()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_info.html)
   and
-  [`a5pyramid::a5_read_pyramid()`](https://rdrr.io/pkg/a5pyramid/man/a5_read_pyramid.html)
+  [`a5pyramid::a5_read_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_read_pyramid.html)
   read them.
   [`a5_view_pyramid()`](https://belian-earth.github.io/a5view/dev/reference/a5_view_pyramid.md)
   refuses files written by a5view 0.3 and asks for them to be rebuilt
@@ -54,19 +54,60 @@
   that include the outline state.
 - A `lod_step` reaching below LOD 2 no longer errors (“wrong sign in
   ‘by’ argument”); the pyramid then holds the data resolution only.
+- [`a5_view()`](https://belian-earth.github.io/a5view/dev/reference/a5_view.md)
+  and
+  [`a5_view_update()`](https://belian-earth.github.io/a5view/dev/reference/a5_view_update.md)
+  build pyramids in memory with
+  [`a5pyramid::a5_pyramid_arrow()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_arrow.html)
+  and write no temp file. Outside Shiny the tiles travel as one deflated
+  Arrow IPC stream, which for `s2_santiago` with an RGB fill makes the
+  page 130 KB rather than 212 KB with Parquet. Inside Shiny each
+  output’s tiles are held with the session, replaced by the output’s
+  next pyramid, and served one tile per request, so only the tiles in
+  view are transferred. The browser decodes Arrow tiles without
+  hyparquet, about a quarter less work per tile.
+  [`a5_build_pyramid()`](https://belian-earth.github.io/a5view/dev/reference/a5_build_pyramid.md)
+  and
+  [`a5_view_pyramid()`](https://belian-earth.github.io/a5view/dev/reference/a5_view_pyramid.md)
+  still write and read Parquet files.
+- Pyramids written by a5pyramid from 2026-11-09, which name the index’s
+  `tiles` and `tile_bbox` (were `row_groups` and `row_group_bbox`), draw
+  again; files with the old names still draw.
+- Zooming across levels of detail no longer blanks the map for a moment.
+  The new level’s tiles are built undrawn and replace the old level in a
+  single frame once every tile in view is ready, so two translucent
+  levels are never drawn over each other. The same applies when cell
+  outlines appear or disappear as cells grow or shrink on screen. A
+  level still incomplete after 1.5 s is drawn anyway.
+- Changing the opacity no longer rebuilds every pyramid tile: the new
+  opacity is applied to the tiles’ existing layers.
+- Returning to a level of detail drawn earlier no longer fails with
+  “deck: initialization of TileLayer(…): deck.gl: assertion failed” and
+  draws nothing at that level. The renderer handed deck.gl a layer
+  instance it had already finalised; it now builds a fresh one.
 - Internals: the lazy renderer reads the a5pyramid index and draws every
-  level as tiles, one per row group, decoding the row groups of levels
-  of up to 10,000 cells as soon as the file opens. The `a5view-tiling`
+  level as tiles, one per row group or record batch, decoding the tiles
+  of levels of up to 10,000 cells as soon as the pyramid opens. It reads
+  Parquet with hyparquet and Arrow with the page’s Arrow JS, in a
+  worker, falling back to the main thread when the worker cannot load
+  its libraries. The libraries’ URLs are written into the worker when it
+  is created, so its messages carry data only. The `a5view-tiling`
   dependency is versioned 0.3.0.9000, so browsers do not reuse the old
   script.
 
 ### Other changes
+
+- deck.gl 9.4.1 (was 9.4.0), with fixes to MapLibre interleaving and the
+  globe, and the vendored hyparquet 1.33.0 (was 1.25.6). deck.gl 9.4
+  still bundles a5-js 0.10, so a5view keeps drawing `A5Layer` boundaries
+  with its own a5-js 1.0 until deck.gl v10.
 
 - [`geom_a5()`](https://belian-earth.github.io/a5view/dev/reference/geom_a5.md)
   no longer warns “`closed` was renamed `closed_ring`” with a5R 1.0.0:
   it relies on
   [`a5_cell_to_boundary_xy()`](https://belian-earth.github.io/a5R/reference/a5_cell_to_boundary_xy.html)’s
   open-ring default instead of naming the argument.
+
 - The example apps use
   [`a5R::a5_threads()`](https://belian-earth.github.io/a5R/reference/a5_threads.html),
   which replaces

@@ -48,10 +48,10 @@
   // Memoisation grid for viewport keys.
   TILING.BBOX_QUANTUM_DIVISOR = 32;
 
-  // Minimum time (ms) the previous LOD's layer stays in the scene
-  // after a LOD change. Forces a visible crossover even when decodes
-  // are fast. <100 is invisible; >300 feels laggy.
-  TILING.MIN_HOLD_MS = 1000;
+  // Longest time (ms) a LOD change keeps drawing the previous level while
+  // the new level builds its tiles in view (see the lazy renderer's
+  // buildLodLayers). Normally the swap comes as soon as they are built.
+  TILING.MAX_HOLD_MS = 1500;
 
   // ───────────────────────────────────────────────────────────────────
   // a5-js bridge

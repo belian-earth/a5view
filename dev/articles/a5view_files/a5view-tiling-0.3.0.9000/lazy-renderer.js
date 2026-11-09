@@ -1,32 +1,42 @@
 // =====================================================================
-// a5view lazy parquet renderer
+// a5view lazy pyramid renderer
 // =====================================================================
-// Reads row groups on demand from a pyramid parquet file so initial
-// paint only decodes what the current viewport + LOD need. Subsequent
-// pans/zooms decode any newly-required row groups; everything else is
-// served from a per-row-group cache of packed geometry.
+// Reads the tiles of an a5pyramid pyramid on demand, so initial paint
+// only decodes what the current viewport + LOD need. Subsequent
+// pans/zooms decode any newly-required tiles; everything else is served
+// from a per-tile cache of packed geometry.
 //
-// Wire format: an a5pyramid file (written by a5pyramid::a5_write_pyramid()
-// through R/prep-data.R::write_pyramid(); specified in a5pyramid's
-// FORMAT.md):
-//   - Row groups follow the levels in ascending LOD order; each row group
-//     holds one level and is one tile, a run of consecutive cell ids.
-//   - Schema KV metadata key `a5pyramid` holds the JSON index: `levels`
-//     (each `{lod, rows, row_groups: [start, end)}`) and `row_group_bbox`,
-//     `[west, south, east, north]` per row group, flat. `west > east`
-//     means the box crosses the antimeridian.
-//   - KV `a5_index` records the A5 index version of the cell ids.
+// Wire format: an a5pyramid pyramid (specified in a5pyramid's FORMAT.md),
+// in one of its two forms:
+//   - Parquet, a file written by a5pyramid::a5_write_pyramid() through
+//     R/prep-data.R::write_pyramid(); tile i is row group i. Inlined as
+//     base64 or served with Range support (a5_view_pyramid()).
+//   - Arrow, a table from a5pyramid::a5_pyramid_arrow() through
+//     R/prep-data.R::pyramid_arrow(); tile i is record batch i. Inlined as
+//     one deflated IPC stream, or served one deflated IPC stream per
+//     tile (a5_view() and a5_view_update(), see R/serve.R).
+// In both:
+//   - Tiles follow the levels in ascending LOD order; each holds one
+//     level, a run of consecutive cell ids.
+//   - Metadata key `a5pyramid` (Parquet KV metadata, Arrow schema
+//     metadata) holds the JSON index: `levels` (each `{lod, rows, tiles:
+//     [start, end)}`) and `tile_bbox`, `[west, south, east, north]` per
+//     tile, flat. `west > east` means the box crosses the antimeridian.
+//     Files written before 2026-11-09 name these `row_groups` and
+//     `row_group_bbox`; both are read.
+//   - Key `a5_index` records the A5 index version of the cell ids.
 //   - Columns `cell` (uint64), `lod`, `ncell`, then the payload columns
 //     `_fill_r/g/b/a`, `_fill_value`, `_elevation` as present.
-//   Every row group is one tile of the TileLayer for its level. Row
-//   groups of levels with at most TILING.EAGER_MAX_ROWS rows are decoded
-//   as soon as the file opens.
+//   Every pyramid tile is one tile of the TileLayer for its level. Tiles
+//   of levels with at most TILING.EAGER_MAX_ROWS rows are decoded as soon
+//   as the pyramid opens. (The renderer's own names, `rg`, `rgIndex`,
+//   count tiles.)
 //
 // Work split:
-//   - A Web Worker owns the parquet source (inline bytes or an HTTP URL
-//     read with Range requests), decodes row groups with hyparquet and
-//     turns each into packed typed arrays: pentagon boundaries from
-//     a5-js, RGBA, fill values. Only transferable buffers cross back.
+//   - A Web Worker owns the source, reads tiles (with hyparquet, or Arrow
+//     JS after inflating with DecompressionStream) and turns each into
+//     packed typed arrays: pentagon boundaries from a5-js, RGBA, fill
+//     values. Only transferable buffers cross back.
 //   - The main thread builds deck.gl layers from those buffers using
 //     binary attributes (no per-cell objects, no accessor calls, no
 //     polygon normalisation), so a tile's first paint costs a few
@@ -41,18 +51,22 @@
 //     cells are big enough on screen to show a border (see
 //     buildGeomLayer). A change of stroke starts a fresh TileLayer, so
 //     tiles are rebuilt with or without outlines.
+//   - On a LOD change the new level's tiles are built undrawn and swapped
+//     in once complete; opacity reaches built tiles without a rebuild
+//     (see tileLayerClass and buildLodLayers).
 //
 // Dependencies:
-//   - window.A5ViewHyparquetReady / window.A5ViewHyparquetUrl (set by
-//     lib/hyparquet/hyparquet-bootstrap.js)
+//   - window.A5ViewHyparquetReady / A5ViewHyparquetUrl / A5ViewHyparquetCdn
+//     (set by lib/hyparquet/hyparquet-bootstrap.js)
+//   - window.Arrow (Arrow JS, attached by geoarrowWidget)
 //   - window.A5Ready / window.A5ViewA5Url (set by lib/a5-js/bridge.js)
 //   - window.A5View.tiling: getViewportBbox, bboxKey, getA5Resolution,
-//     pickLod, bigintToHex, REBUILD_THROTTLE_MS, MIN_HOLD_MS.
+//     pickLod, bigintToHex, REBUILD_THROTTLE_MS, MAX_HOLD_MS.
 //
 // ctx (provided by a5view.js):
 //   getOpacity()    current layer opacity
 //   getBeforeId()   MapLibre layer id to insert cell layers beneath
-//   onDataReady()   called whenever a row group's geometry lands
+//   onDataReady()   called whenever a tile's geometry lands
 // =====================================================================
 (function () {
   var T = window.A5View = window.A5View || {};
@@ -69,14 +83,14 @@
   TILING.EAGER_MAX_ROWS = 10000;
 
   // ───────────────────────────────────────────────────────────────────
-  // Tile core: source handling + row-group decode + geometry packing.
+  // Tile core: source handling + tile decode + geometry packing.
   //
-  // Written as a self-contained function of its two library modules so
+  // Written as a self-contained function of its library modules so
   // the very same code runs inside a Worker (stringified into a Blob)
   // or on the main thread as a fallback. Nothing in here may reference
   // closure variables from this file.
   // ───────────────────────────────────────────────────────────────────
-  function tileCore(A5, hp) {
+  function tileCore(A5, hp, Arrow) {
     var file = null;      // AsyncBuffer
     var metadata = null;
     var rowOffsets = null;
@@ -181,9 +195,82 @@
       return BigInt(v);
     }
 
-    // source: { b64 } or { url, bytes }. Resolves to the a5pyramid index
-    // (the parsed `a5pyramid` KV entry) once the footer has been read.
-    function open(source) {
+    // Inflate zlib-format bytes (R's memCompress(type = "gzip")).
+    function inflate(bytes) {
+      if (typeof DecompressionStream === "undefined") {
+        return Promise.reject(new Error("this browser cannot inflate the pyramid (no DecompressionStream)"));
+      }
+      var stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate"));
+      return new Response(stream).arrayBuffer().then(function (buf) { return new Uint8Array(buf); });
+    }
+
+    // Check and parse the `a5pyramid` index against the `a5_index` entry.
+    function readIndex(json, a5Index) {
+      if (!json) {
+        throw new Error("not an a5pyramid pyramid (no `a5pyramid` metadata); rebuild it with a5_build_pyramid()");
+      }
+      var index = typeof json === "string" ? JSON.parse(json) : json;
+      if (!(index.format_version <= 1)) {
+        throw new Error("a5pyramid format version " + index.format_version + " is newer than this viewer reads");
+      }
+      if (a5Index !== "1.0") {
+        throw new Error("the pyramid's cells are not A5 1.0 ids (a5_index " + a5Index + ")");
+      }
+      return index;
+    }
+
+    // Tiles the index lists: the end of the last level's range.
+    function indexTileCount(index) {
+      var last = index.levels[index.levels.length - 1];
+      var range = last ? (last.tiles || last.row_groups) : [0, 0];
+      return range[1];
+    }
+
+    // A tile's columns, the form decode() packs:
+    //   { n, cell, fill_r, fill_g, fill_b, fill_a, fill_value, elevation }
+    // `cell` holds BigInt ids, the rest numbers (null where missing);
+    // each is an array or typed array, or null when the column is absent.
+    var PAYLOAD = { fill_r: "_fill_r", fill_g: "_fill_g", fill_b: "_fill_b",
+                    fill_a: "_fill_a", fill_value: "_fill_value", elevation: "_elevation" };
+
+    function rowsToColumns(rows) {
+      var n = rows.length;
+      var first = rows[0] || {};
+      var out = { n: n, cell: new Array(n) };
+      for (var i = 0; i < n; i++) out.cell[i] = toBigIntCell(rows[i].cell);
+      Object.keys(PAYLOAD).forEach(function (k) {
+        var name = PAYLOAD[k];
+        if (n === 0 || first[name] === undefined) { out[k] = null; return; }
+        var col = new Array(n);
+        for (var j = 0; j < n; j++) col[j] = rows[j][name];
+        out[k] = col;
+      });
+      return out;
+    }
+
+    function batchToColumns(batch) {
+      var n = batch.numRows;
+      function column(name) {
+        var v = batch.getChild(name);
+        if (!v) return null;
+        // toArray() is a view of the values, which ignores validity
+        if (v.nullCount === 0) return v.toArray();
+        var out = new Array(n);
+        for (var i = 0; i < n; i++) out[i] = v.get(i);
+        return out;
+      }
+      var out = { n: n, cell: column("cell") };
+      Object.keys(PAYLOAD).forEach(function (k) { out[k] = column(PAYLOAD[k]); });
+      return out;
+    }
+
+    // Sources. Each open* resolves to the index and sets readTile(i), a
+    // Promise of tile i's columns.
+    var readTile = null;
+
+    // Parquet, inline ({ b64 }) or served with Range support ({ url,
+    // bytes }): tile i is row group i.
+    function openParquet(source) {
       var p;
       if (source.url) {
         file = remoteBuffer(source.url, Number(source.bytes));
@@ -206,21 +293,79 @@
         });
         var kv = {};
         (md.key_value_metadata || []).forEach(function (e) { kv[e.key] = e.value; });
-        if (!kv.a5pyramid) {
-          throw new Error("not an a5pyramid file (no `a5pyramid` metadata); rebuild it with a5_build_pyramid()");
-        }
-        var index = JSON.parse(kv.a5pyramid);
-        if (!(index.format_version <= 1)) {
-          throw new Error("a5pyramid format version " + index.format_version + " is newer than this viewer reads");
-        }
-        if (kv.a5_index !== "1.0") {
-          throw new Error("the file's cells are not A5 1.0 ids (a5_index " + kv.a5_index + ")");
-        }
+        var index = readIndex(kv.a5pyramid, kv.a5_index);
+        readTile = function (i) {
+          var off = rowOffsets[i];
+          var ready = Promise.resolve();
+          if (file.prefetch) {
+            var range = rowGroupByteRange(metadata.row_groups[i]);
+            ready = file.prefetch(range.start, range.end);
+          }
+          return ready.then(function () {
+            return hp.parquetReadObjects({
+              file: file, metadata: metadata, rowStart: off.start, rowEnd: off.end
+            });
+          }).then(rowsToColumns);
+        };
         return index;
       });
     }
 
-    // Decode one row group and pack it:
+    // Arrow, inline: { b64 }, one deflated IPC stream of every tile, the
+    // index in its schema metadata. Tile i is record batch i.
+    function openArrowInline(source) {
+      return inflate(base64ToBytes(source.b64)).then(function (bytes) {
+        var table = Arrow.tableFromIPC(bytes);
+        var meta = table.schema.metadata;
+        var index = readIndex(meta.get("a5pyramid"), meta.get("a5_index"));
+        var batches = table.batches;
+        if (batches.length !== indexTileCount(index)) {
+          throw new Error("the pyramid has " + batches.length + " record batches but its index lists " +
+                          indexTileCount(index) + " tiles");
+        }
+        readTile = function (i) { return Promise.resolve(batchToColumns(batches[i])); };
+        return index;
+      });
+    }
+
+    // Arrow, served: { url, tiles, index, a5_index }. Tile i is a deflated
+    // IPC stream of one record batch at url + "&tile=" + i.
+    function openArrowServed(source) {
+      var index = readIndex(source.index, source.a5_index);
+      if (Number(source.tiles) !== indexTileCount(index)) {
+        throw new Error("the server has " + source.tiles + " tiles but the index lists " +
+                        indexTileCount(index));
+      }
+      var sep = source.url.indexOf("?") === -1 ? "?" : "&";
+      readTile = function (i) {
+        return fetch(source.url + sep + "tile=" + i).then(function (res) {
+          if (!res.ok) throw new Error("tile request failed: " + res.status);
+          return res.arrayBuffer();
+        }).then(function (buf) {
+          return inflate(new Uint8Array(buf));
+        }).then(function (bytes) {
+          var batches = Arrow.tableFromIPC(bytes).batches;
+          if (batches.length !== 1) throw new Error("tile " + i + " holds " + batches.length + " record batches");
+          return batchToColumns(batches[0]);
+        });
+      };
+      return Promise.resolve(index);
+    }
+
+    // source: { format: "parquet" | "arrow", ... } (see the open*
+    // functions). Resolves to the a5pyramid index.
+    function open(source) {
+      return Promise.resolve().then(function () {
+        if (source.format === "arrow") {
+          if (!Arrow) throw new Error("Arrow JS is not loaded");
+          return source.url ? openArrowServed(source) : openArrowInline(source);
+        }
+        if (!hp) throw new Error("hyparquet is not loaded");
+        return openParquet(source);
+      });
+    }
+
+    // Decode one tile and pack it:
     //   cells      BigUint64Array(n)       cell ids
     //   starts     Uint32Array(n + 1)      vertex start index per cell
     //   positions  Float64Array(nv * 2)    [lon, lat, ...]
@@ -230,104 +375,118 @@
     // deck.gl's polygon attributes are per vertex, so colour and
     // elevation are expanded here rather than per cell.
     function decode(rgIdx) {
-      var off = rowOffsets[rgIdx];
-      var ready = Promise.resolve();
-      if (file.prefetch) {
-        var range = rowGroupByteRange(metadata.row_groups[rgIdx]);
-        ready = file.prefetch(range.start, range.end);
+      return readTile(rgIdx).then(function (cols) { return pack(rgIdx, cols); });
+    }
+
+    function pack(rgIdx, cols) {
+      var n = cols.n;
+      var cells = new BigUint64Array(n);
+      if (cols.cell instanceof BigUint64Array) {
+        cells.set(cols.cell);
+      } else {
+        for (var c0 = 0; c0 < n; c0++) cells[c0] = toBigIntCell(cols.cell[c0]);
       }
-      return ready.then(function () {
-        return hp.parquetReadObjects({
-          file: file, metadata: metadata, rowStart: off.start, rowEnd: off.end
-        });
-      }).then(function (rows) {
-        var n = rows.length;
-        var hasColor = n > 0 && rows[0]._fill_r !== undefined;
-        var hasValue = n > 0 && rows[0]._fill_value !== undefined;
-        var hasElev = n > 0 && rows[0]._elevation !== undefined;
-        var cells = new BigUint64Array(n);
-        var rings = new Array(n);
-        var nv = 0;
-        for (var i = 0; i < n; i++) {
-          var cell = toBigIntCell(rows[i].cell);
-          cells[i] = cell;
-          var ring = A5.cellToBoundary(cell, { closedRing: false });
-          rings[i] = ring;
-          nv += ring.length;
+      var rings = new Array(n);
+      var nv = 0;
+      for (var i = 0; i < n; i++) {
+        var ring = A5.cellToBoundary(cells[i], { closedRing: false });
+        rings[i] = ring;
+        nv += ring.length;
+      }
+      var starts = new Uint32Array(n + 1);
+      var positions = new Float64Array(nv * 2);
+      var p = 0;
+      for (var j = 0; j < n; j++) {
+        starts[j] = p / 2;
+        var r = rings[j];
+        for (var k = 0; k < r.length; k++) {
+          positions[p++] = r[k][0];
+          positions[p++] = r[k][1];
         }
-        var starts = new Uint32Array(n + 1);
-        var positions = new Float64Array(nv * 2);
-        var p = 0;
-        for (var j = 0; j < n; j++) {
-          starts[j] = p / 2;
-          var r = rings[j];
-          for (var k = 0; k < r.length; k++) {
-            positions[p++] = r[k][0];
-            positions[p++] = r[k][1];
+      }
+      starts[n] = nv;
+      var out = { rg: rgIdx, n: n, cells: cells, starts: starts, positions: positions };
+      var transfer = [cells.buffer, starts.buffer, positions.buffer];
+      if (cols.fill_r) {
+        var colors = new Uint8Array(nv * 4);
+        var fr = cols.fill_r, fg = cols.fill_g, fb = cols.fill_b, fa = cols.fill_a;
+        for (var c = 0; c < n; c++) {
+          for (var cv = starts[c]; cv < starts[c + 1]; cv++) {
+            colors[cv * 4] = fr[c]; colors[cv * 4 + 1] = fg[c];
+            colors[cv * 4 + 2] = fb[c]; colors[cv * 4 + 3] = fa[c];
           }
         }
-        starts[n] = nv;
-        var out = { rg: rgIdx, n: n, cells: cells, starts: starts, positions: positions };
-        var transfer = [cells.buffer, starts.buffer, positions.buffer];
-        if (hasColor) {
-          var colors = new Uint8Array(nv * 4);
-          for (var c = 0; c < n; c++) {
-            var row = rows[c];
-            for (var cv = starts[c]; cv < starts[c + 1]; cv++) {
-              colors[cv * 4] = row._fill_r; colors[cv * 4 + 1] = row._fill_g;
-              colors[cv * 4 + 2] = row._fill_b; colors[cv * 4 + 3] = row._fill_a;
-            }
-          }
-          out.colors = colors; transfer.push(colors.buffer);
+        out.colors = colors; transfer.push(colors.buffer);
+      }
+      if (cols.fill_value) {
+        var values = new Float32Array(n);
+        for (var v = 0; v < n; v++) values[v] = cols.fill_value[v];
+        out.values = values; transfer.push(values.buffer);
+      }
+      if (cols.elevation) {
+        var elev = new Float64Array(nv);
+        for (var e = 0; e < n; e++) {
+          var ev = cols.elevation[e] || 0;
+          for (var ei = starts[e]; ei < starts[e + 1]; ei++) elev[ei] = ev;
         }
-        if (hasValue) {
-          var values = new Float32Array(n);
-          for (var v = 0; v < n; v++) values[v] = rows[v]._fill_value;
-          out.values = values; transfer.push(values.buffer);
-        }
-        if (hasElev) {
-          var elev = new Float64Array(nv);
-          for (var e = 0; e < n; e++) {
-            var ev = rows[e]._elevation || 0;
-            for (var ei = starts[e]; ei < starts[e + 1]; ei++) elev[ei] = ev;
-          }
-          out.elevation = elev; transfer.push(elev.buffer);
-        }
-        out.transfer = transfer;
-        return out;
-      });
+        out.elevation = elev; transfer.push(elev.buffer);
+      }
+      out.transfer = transfer;
+      return out;
     }
 
     return { open: open, decode: decode };
   }
 
-  // Worker entry: import the two libraries, then serve open / decode
-  // requests over postMessage. Runs from a Blob URL so no extra file
-  // has to be shipped; it inherits the page's origin.
-  function workerMain() {
+  // For tests (tests/testthat/test-lazy-renderer.R), which run it under Node.
+  LAZY._tileCore = tileCore;
+
+  // Worker entry: load the libraries the source needs (a5-js and
+  // hyparquet as ES modules, Arrow JS as a classic script), then serve
+  // open / decode requests over postMessage. Runs from a Blob URL so no
+  // extra file has to be shipped; it inherits the page's origin.
+  //
+  // `libs` (see libUrls()) is written into the worker's source when it
+  // is created, so the code the worker loads is fixed then; messages
+  // carry data only.
+  function workerMain(libs) {
     var core = null;
-    var libs = null;
-    function loadLibs(urls) {
-      if (libs) return libs;
-      function tryImport(list) {
-        return import(list[0]).catch(function (e) {
-          if (list.length > 1) return tryImport(list.slice(1));
-          throw e;
-        });
-      }
-      libs = Promise.all([tryImport(urls.a5), tryImport(urls.hyparquet)]);
-      return libs;
+    var loaded = {};
+    function tryImport(list) {
+      return import(list[0]).catch(function (e) {
+        if (list.length > 1) return tryImport(list.slice(1));
+        throw e;
+      });
     }
+    function loadArrow(list) {
+      var err = new Error("Arrow JS not found");
+      for (var i = 0; i < list.length && !self.Arrow; i++) {
+        try { importScripts(list[i]); } catch (e) { err = e; }
+      }
+      return self.Arrow ? Promise.resolve(self.Arrow) : Promise.reject(err);
+    }
+    function lib(name) {
+      if (!loaded[name]) loaded[name] = name === "arrow" ? loadArrow(libs.arrow) : tryImport(libs[name]);
+      return loaded[name];
+    }
+    function errorMessage(e) { return String(e && e.message || e); }
     self.onmessage = function (ev) {
       var msg = ev.data;
       if (msg.type === "open") {
-        loadLibs(msg.libs).then(function (mods) {
-          core = tileCore(mods[0], mods[1]);
-          return core.open(msg.source);
-        }).then(function (index) {
-          self.postMessage({ type: "opened", id: msg.id, index: index });
-        }).catch(function (e) {
-          self.postMessage({ type: "error", id: msg.id, message: String(e && e.message || e) });
+        var arrow = msg.source.format === "arrow";
+        Promise.all([
+          lib("a5"),
+          arrow ? null : lib("hyparquet"),
+          arrow ? lib("arrow") : null
+        ]).then(function (mods) {
+          core = tileCore(mods[0], mods[1], mods[2]);
+          return core.open(msg.source).then(function (index) {
+            self.postMessage({ type: "opened", id: msg.id, index: index });
+          }, function (e) {
+            self.postMessage({ type: "error", id: msg.id, message: errorMessage(e) });
+          });
+        }, function (e) {
+          self.postMessage({ type: "error", id: msg.id, loadFailed: true, message: errorMessage(e) });
         });
       } else if (msg.type === "decode") {
         core.decode(msg.rg).then(function (out) {
@@ -335,16 +494,17 @@
           out.type = "decoded"; out.id = msg.id;
           self.postMessage(out, transfer);
         }).catch(function (e) {
-          self.postMessage({ type: "error", id: msg.id, rg: msg.rg, message: String(e && e.message || e) });
+          self.postMessage({ type: "error", id: msg.id, rg: msg.rg, message: errorMessage(e) });
         });
       }
     };
   }
 
-  function makeWorker() {
+  function makeWorker(libs) {
     if (typeof Worker === "undefined" || typeof Blob === "undefined") return null;
     try {
-      var src = tileCore.toString() + "\n(" + workerMain.toString() + ")();";
+      var src = tileCore.toString() + "\n(" + workerMain.toString() + ")(" +
+        JSON.stringify(libs) + ");";
       var url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
       var w = new Worker(url);
       URL.revokeObjectURL(url);
@@ -355,48 +515,18 @@
     }
   }
 
-  // Uniform promise-based front over either a worker or the in-thread
-  // core: { open(source) -> Promise<a5pyramid index>, decode(rg) -> Promise<packed>,
-  // close(), isWorker }
-  function makeDecoder(libUrls) {
-    var worker = makeWorker();
-    if (worker) {
-      var pending = new Map();
-      var nextId = 1;
-      worker.onmessage = function (ev) {
-        var msg = ev.data;
-        var p = pending.get(msg.id);
-        if (!p) return;
-        pending.delete(msg.id);
-        if (msg.type === "error") p.reject(new Error(msg.message));
-        else p.resolve(msg);
-      };
-      worker.onerror = function (e) {
-        pending.forEach(function (p) { p.reject(new Error("worker error: " + (e.message || e))); });
-        pending.clear();
-      };
-      function send(msg) {
-        return new Promise(function (resolve, reject) {
-          msg.id = nextId++;
-          pending.set(msg.id, { resolve: resolve, reject: reject });
-          worker.postMessage(msg);
-        });
-      }
-      return {
-        isWorker: true,
-        open: function (source) {
-          return send({ type: "open", source: source, libs: libUrls }).then(function (m) { return m.index; });
-        },
-        decode: function (rg) { return send({ type: "decode", rg: rg }); },
-        close: function () { worker.terminate(); pending.clear(); }
-      };
-    }
+  // The core on the main thread, with the page's libraries.
+  function inThreadDecoder() {
     var core = null;
     return {
       isWorker: false,
       open: function (source) {
-        return Promise.all([TILING.ensureA5(), window.A5ViewHyparquetReady]).then(function (mods) {
-          core = tileCore(mods[0], mods[1]);
+        var arrow = source.format === "arrow";
+        return Promise.all([
+          TILING.ensureA5(),
+          arrow ? null : window.A5ViewHyparquetReady
+        ]).then(function (mods) {
+          core = tileCore(mods[0], mods[1], arrow ? window.Arrow : null);
           return core.open(source);
         });
       },
@@ -405,14 +535,80 @@
     };
   }
 
+  // Uniform promise-based front over either a worker or the in-thread
+  // core: { open(source) -> Promise<a5pyramid index>, decode(rg) -> Promise<packed>,
+  // close(), isWorker }. A worker that cannot load its libraries hands
+  // over to the main thread.
+  function makeDecoder(libUrls) {
+    var worker = makeWorker(libUrls);
+    if (!worker) return inThreadDecoder();
+    var pending = new Map();
+    var nextId = 1;
+    worker.onmessage = function (ev) {
+      var msg = ev.data;
+      var p = pending.get(msg.id);
+      if (!p) return;
+      pending.delete(msg.id);
+      if (msg.type === "error") {
+        var err = new Error(msg.message);
+        err.loadFailed = !!msg.loadFailed;
+        p.reject(err);
+      } else {
+        p.resolve(msg);
+      }
+    };
+    worker.onerror = function (e) {
+      pending.forEach(function (p) { p.reject(new Error("worker error: " + (e.message || e))); });
+      pending.clear();
+    };
+    function send(msg) {
+      return new Promise(function (resolve, reject) {
+        msg.id = nextId++;
+        pending.set(msg.id, { resolve: resolve, reject: reject });
+        worker.postMessage(msg);
+      });
+    }
+    var front = {
+      isWorker: true,
+      open: function (source) {
+        return send({ type: "open", source: source }).then(function (m) {
+          return m.index;
+        }, function (e) {
+          if (!e.loadFailed) throw e;
+          log("[a5view] worker could not load its libraries (" + e.message + "); decoding on main thread");
+          front.close();
+          var local = inThreadDecoder();
+          front.isWorker = false;
+          front.decode = local.decode;
+          front.close = local.close;
+          return local.open(source);
+        });
+      },
+      decode: function (rg) { return send({ type: "decode", rg: rg }); },
+      close: function () { worker.terminate(); pending.clear(); }
+    };
+    return front;
+  }
+
+  // Arrow JS is on the page from geoarrowWidget; the worker loads the
+  // same script, falling back to the CDN build of the same version.
+  var ARROW_CDN = "https://cdn.jsdelivr.net/npm/apache-arrow@21.2.0/Arrow.es2015.min.js";
+
   function libUrls() {
     var a5 = [];
     if (window.A5ViewA5Url) a5.push(window.A5ViewA5Url);
     if (window.A5ViewA5Cdn) a5.push(window.A5ViewA5Cdn);
     var hyp = [];
     if (window.A5ViewHyparquetUrl) hyp.push(window.A5ViewHyparquetUrl);
-    hyp.push("https://cdn.jsdelivr.net/npm/hyparquet@1.25.6/+esm");
-    return { a5: a5, hyparquet: hyp };
+    if (window.A5ViewHyparquetCdn) hyp.push(window.A5ViewHyparquetCdn);
+    var arrow = [];
+    var scripts = document.getElementsByTagName("script");
+    for (var i = 0; i < scripts.length; i++) {
+      var src = scripts[i].src || "";
+      if (/Arrow\.es\d+\.min\.js/.test(src)) arrow.push(absoluteUrl(src));
+    }
+    arrow.push(ARROW_CDN);
+    return { a5: a5, hyparquet: hyp, arrow: arrow };
   }
 
   function absoluteUrl(url) {
@@ -479,6 +675,7 @@
     var pendingDecodes = new Map(); // rg -> Promise
     var loadVersion = 0;
     var ready = false;
+    var sourceFormat = null;        // "parquet" or "arrow"
 
     // Per-LOD lookup tables built from rgIndex.
     var tilesByLod = new Map();     // lod -> Map<tileHex, [rgIdx, ...]>
@@ -486,7 +683,6 @@
     var tileGeomCache = new Map();  // lod -> Map<tileHex, { count, geom }>
     var tilesetClassesByLod = new Map();
     var layerMemo = new Map();      // layerId -> { key, layer }
-    var currentTilesId = new Map(); // lod -> id of its current TileLayer
     var dirtyTiles = new Map();     // lod -> Set<tileHex>
     // Hover lookup: lod -> { index: Map<hex, [rg, i]>, pending: [rg, ...] }
     var rowsByLod = new Map();
@@ -494,10 +690,17 @@
     var MAX_CONCURRENT_DECODES = 8;
     var decodeQueue = [];
 
-    var lastBuiltLod = null;
-    var prevWarmLod = null;
-    var lodChangedAt = 0;
+    // Level changes (see buildLodLayers): `shownId` is the TileLayer drawn,
+    // at LOD `shownLod`; a newly wanted TileLayer (a new LOD, or the same
+    // LOD with or without outlines) is `pendingId` while it builds its
+    // tiles undrawn, since `pendingSince`.
+    var shownId = null;
+    var shownLod = null;
+    var pendingId = null;
+    var pendingSince = null;
     var holdTimer = null;
+    var lastOpacity = null;
+    var builtTiles = new Map();     // TileLayer id -> Set<tileHex> with sub-layers
 
     var nowMs = (typeof performance !== "undefined" && performance.now)
       ? function () { return performance.now(); }
@@ -515,28 +718,32 @@
       tileGeomCache = new Map();
       tilesetClassesByLod = new Map();
       layerMemo = new Map();
-      currentTilesId = new Map();
       dirtyTiles = new Map();
       rowsByLod = new Map();
-      lastBuiltLod = null;
-      prevWarmLod = null;
-      lodChangedAt = 0;
+      shownId = null;
+      shownLod = null;
+      pendingId = null;
+      pendingSince = null;
+      lastOpacity = null;
+      builtTiles = new Map();
       if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
       if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
       ready = false;
       loadVersion++;
     }
 
-    // source: { b64 } (inline) or { url, bytes } (served with Range
-    // support). Resolves once the row-group index is known; row groups
-    // decode on demand from then on.
+    // source: { format: "parquet", b64 | url, bytes } or
+    // { format: "arrow", b64 | url, tiles, index, a5_index } (see
+    // tileCore's open*). Resolves once the index is known; tiles decode on
+    // demand from then on.
     function init(source) {
       reset();
       var thisLoad = loadVersion;
       var t0 = nowMs();
-      if (source.url) source = { url: absoluteUrl(source.url), bytes: source.bytes };
-      log("[a5view] lazy.init: " + (source.url ? "url " + source.url + " bytes=" + source.bytes
-                                               : "inline b64=" + (source.b64 && source.b64.length)));
+      if (source.url) source = Object.assign({}, source, { url: absoluteUrl(source.url) });
+      sourceFormat = source.format || "parquet";
+      log("[a5view] lazy.init: " + sourceFormat + " " +
+          (source.url ? "url " + source.url : "inline b64=" + (source.b64 && source.b64.length)));
       decoder = makeDecoder(libUrls());
       return decoder.open(source).then(function (index) {
         if (thisLoad !== loadVersion) return;
@@ -544,10 +751,13 @@
         // { rg, lod_min, lod_max, west, south, east, north, tile_id, eager }.
         // Each row group is its own tile.
         rgIndex = [];
-        var boxes = index.row_group_bbox;
+        // a5pyramid renamed `row_groups` / `row_group_bbox` to `tiles` /
+        // `tile_bbox` on 2026-11-09; read either.
+        var boxes = index.tile_bbox || index.row_group_bbox;
         index.levels.forEach(function (level) {
           var eager = level.rows <= TILING.EAGER_MAX_ROWS;
-          for (var rg = level.row_groups[0]; rg < level.row_groups[1]; rg++) {
+          var range = level.tiles || level.row_groups;
+          for (var rg = range[0]; rg < range[1]; rg++) {
             rgIndex.push({
               rg: rg, lod_min: level.lod, lod_max: level.lod,
               west: boxes[4 * rg], south: boxes[4 * rg + 1],
@@ -588,10 +798,11 @@
 
     function startDecode(rgIdx) {
       var thisLoad = loadVersion;
+      var pending = pendingDecodes; // reset() starts a new map
       var t0 = nowMs();
       var p = decoder.decode(rgIdx).then(function (packed) {
-        pendingDecodes.delete(rgIdx);
-        if (thisLoad !== loadVersion) { pumpDecodeQueue(); return null; }
+        pending.delete(rgIdx);
+        if (thisLoad !== loadVersion) return null;
         decodedCache.set(rgIdx, packed);
         var entry = rgIndex[rgIdx];
         var byLod = rowsByLod.get(entry.lod_min);
@@ -604,8 +815,10 @@
         pumpDecodeQueue();
         return packed;
       }).catch(function (err) {
-        pendingDecodes.delete(rgIdx);
-        console.error("[a5view] row-group", rgIdx, "decode failed:", err);
+        pending.delete(rgIdx);
+        // a decode the next pyramid superseded fails quietly
+        if (thisLoad !== loadVersion) return null;
+        console.error("[a5view] tile", rgIdx, "decode failed:", err);
         pumpDecodeQueue();
         return null;
       });
@@ -646,8 +859,11 @@
       return edgeM / mPerPx;
     }
 
+    // Everything a TileLayer's tiles are built from. deck.gl rebuilds every
+    // tile of a TileLayer whose props change, so opacity is left out: it
+    // reaches the tiles' layers by clone (see tileLayerClass()).
     function styleKey(x, stroked) {
-      return [ctx.getOpacity(), ctx.getBeforeId(), stroked, x.line_width,
+      return [ctx.getBeforeId(), stroked, x.line_width,
               x.extruded, x.elevation_scale, x.fill_per_cell].join("|");
     }
 
@@ -760,7 +976,7 @@
       var set = dirtyTiles.get(lod);
       if (!set) { set = new Set(); dirtyTiles.set(lod, set); }
       set.add(hex);
-      if (ctx.onDataReady) ctx.onDataReady();
+      scheduleRetry(0);
     }
     // Retries always go through a timer: a flush can be requested from
     // inside deck's own render pass (renderSubLayers), and re-entering
@@ -773,63 +989,46 @@
         if (ctx.onDataReady) ctx.onDataReady();
       }, delay);
     }
+    // Release a LOD's dirty tiles in each of its TileLayers (with and
+    // without outlines, which coexist while one replaces the other).
     function flushDirtyTiles(lod) {
       var set = dirtyTiles.get(lod);
       if (!set || set.size === 0) return;
-      var m = layerMemo.get(currentTilesId.get(lod));
-      var tileset = m && m.layer.state && m.layer.state.tileset;
-      if (!tileset) {
-        // deck hasn't applied the layer yet (state moves to the new
-        // instance on its next update); try again shortly.
-        scheduleRetry(50);
+      var layers = [];
+      layerMemo.forEach(function (m) {
+        var l = m.layer;
+        if (l.props.a5Lod === lod && l.state && l.state.tileset) layers.push(l);
+      });
+      if (layers.length === 0) {
+        // No tiles built at this LOD: its next TileLayer builds them from
+        // the decoded data as it is then.
+        dirtyTiles.delete(lod);
         return;
       }
-      var released = 0;
-      var tiles = tileset.tiles || tileset._tiles || [];
       var present = new Set();
-      for (var i = 0; i < tiles.length; i++) {
-        var t = tiles[i];
-        if (!t.index || !set.has(t.index.i)) continue;
-        present.add(t.index.i);
-        if (released < MAX_TILES_PER_FLUSH) {
-          t.layers = null;
-          set.delete(t.index.i);
-          released++;
+      var released = new Set();
+      layers.forEach(function (l) {
+        var n = 0;
+        var tiles = l.state.tileset.tiles || l.state.tileset._tiles || [];
+        for (var i = 0; i < tiles.length; i++) {
+          var t = tiles[i];
+          if (!t.index || !set.has(t.index.i)) continue;
+          present.add(t.index.i);
+          if (released.size < MAX_TILES_PER_FLUSH || released.has(t.index.i)) {
+            t.layers = null;
+            released.add(t.index.i);
+            n++;
+          }
         }
-      }
-      // Tiles no longer in the tileset were evicted; they get a fresh
+        if (n > 0 && typeof l.setNeedsUpdate === "function") l.setNeedsUpdate();
+      });
+      // Tiles no longer in a tileset were evicted; they get a fresh
       // renderSubLayers call if they come back.
-      set.forEach(function (hex) { if (!present.has(hex)) set.delete(hex); });
-      if (released > 0 && typeof m.layer.setNeedsUpdate === "function") m.layer.setNeedsUpdate();
+      set.forEach(function (hex) { if (released.has(hex) || !present.has(hex)) set.delete(hex); });
       if (set.size > 0) scheduleRetry(16);
     }
     function flushAllDirtyTiles() {
       dirtyTiles.forEach(function (set, lod) { if (set.size > 0) flushDirtyTiles(lod); });
-    }
-    function deferTile(lod, hex) {
-      var set = dirtyTiles.get(lod);
-      if (!set) { set = new Set(); dirtyTiles.set(lod, set); }
-      set.add(hex);
-      scheduleRetry(0);
-    }
-    function flushDirtyTiles(lod) {
-      var set = dirtyTiles.get(lod);
-      if (!set || set.size === 0) return;
-      var m = layerMemo.get(currentTilesId.get(lod));
-      var tileset = m && m.layer.state && m.layer.state.tileset;
-      if (!tileset) return; // deck hasn't applied the layer yet; retried on next build
-      var released = 0;
-      var tiles = tileset.tiles || tileset._tiles || [];
-      for (var i = 0; i < tiles.length && released < MAX_TILES_PER_FLUSH; i++) {
-        var t = tiles[i];
-        if (t.index && set.has(t.index.i)) {
-          t.layers = null;
-          set.delete(t.index.i);
-          released++;
-        }
-      }
-      if (released > 0 && typeof m.layer.setNeedsUpdate === "function") m.layer.setNeedsUpdate();
-      if (set.size > 0 && ctx.onDataReady) ctx.onDataReady();
     }
 
     // Tileset2D over the data-bearing tiles of one LOD: atomic tiles,
@@ -870,6 +1069,50 @@
       };
     }
 
+    // deck.gl's TileLayer with two hooks, read when deck updates or draws,
+    // so neither changes the TileLayer's props (which would rebuild every
+    // tile):
+    //   - getSubLayerPropsByTile() hands the current opacity to each
+    //     tile's cached layers, which deck clones when it differs, so an
+    //     opacity change neither rebuilds tiles nor re-tessellates cells;
+    //   - filterSubLayer() draws one TileLayer per frame: the pending one
+    //     once every tile it selected for the viewport is built, else the
+    //     shown one. It runs after deck has built the frame's tiles, so the
+    //     swap happens in the first frame the new layer is complete.
+    var TileLayerClass = null;
+    function tileLayerClass() {
+      if (TileLayerClass) return TileLayerClass;
+      TileLayerClass = class extends window.deck.TileLayer {
+        getSubLayerPropsByTile() { return { opacity: ctx.getOpacity() }; }
+        filterSubLayer(context) {
+          var draw = false;
+          if (this.id === pendingId) draw = layerReady(this);
+          else if (this.id === shownId) draw = pendingId == null || !pendingReady();
+          return draw && super.filterSubLayer(context);
+        }
+      };
+      TileLayerClass.layerName = "A5ViewTileLayer";
+      return TileLayerClass;
+    }
+
+    // Whether every tile a TileLayer selected for the viewport has its
+    // sub-layers built.
+    function layerReady(layer) {
+      var tileset = layer && layer.state && layer.state.tileset;
+      var selected = tileset && tileset.selectedTiles;
+      if (!selected) return false;
+      var built = builtTiles.get(layer.id);
+      for (var i = 0; i < selected.length; i++) {
+        if (!built || !built.has(selected[i].index.i)) return false;
+      }
+      return true;
+    }
+
+    function pendingReady() {
+      var m = pendingId != null && layerMemo.get(pendingId);
+      return !!m && layerReady(m.layer);
+    }
+
     function buildTiledLayer(x, lod, byTile, stroked) {
       var ver = loadVersion;
       var entry = tilesetClassesByLod.get(lod);
@@ -883,14 +1126,16 @@
       // stroked and unstroked tiles are different layer classes (see
       // buildGeomLayer), so a change of stroke starts a fresh TileLayer
       var layerId = "a5-lazy-tiles-lod" + lod + (stroked ? "-stroked" : "") + "-v" + ver;
-      currentTilesId.set(lod, layerId);
       return memoLayer(layerId, styleKey(x, stroked), function () {
-        return new window.deck.TileLayer({
+        var built = new Set();
+        builtTiles.set(layerId, built);
+        var TileLayer = tileLayerClass();
+        return new TileLayer({
           id: layerId,
+          a5Lod: lod,
           data: EMPTY_DATA,
           TilesetClass: TilesetClass,
           extent: [-180, -85.05, 180, 85.05],
-          opacity: ctx.getOpacity(),
           pickable: false,
           beforeId: ctx.getBeforeId(),
           getTileData: function (props) {
@@ -907,9 +1152,16 @@
             if (!rgs || rgs.length === 0) return null;
             var hex = props.tile.index.i;
             var geom = tileGeometry(lod, hex, rgs);
-            if (!geom || geom.n === 0) return null;
-            if (!withinBuildBudget()) { deferTile(lod, hex); return null; }
-            return buildGeomLayer(x, geom, "a5-lazy-lod" + lod + "-tile-" + hex, stroked, {});
+            if (!geom) { built.delete(hex); return null; }
+            if (geom.n === 0) { built.add(hex); return null; }
+            if (!withinBuildBudget()) { built.delete(hex); deferTile(lod, hex); return null; }
+            built.add(hex);
+            // the pending layer may now be complete; check after this pass
+            if (layerId === pendingId) scheduleRetry(16);
+            // ids are unique across TileLayers: deck matches layers by id
+            // over the whole tree, and two TileLayers of one LOD coexist
+            // while one replaces the other
+            return buildGeomLayer(x, geom, layerId + "-tile-" + hex, stroked, {});
           }
         });
       });
@@ -922,28 +1174,46 @@
       return null;
     }
 
-    function lodHasDecodedData(lod) {
-      var byTile = tilesByLod.get(lod);
-      if (!byTile) return false;
-      var found = false;
-      byTile.forEach(function (rgs) {
-        if (found) return;
-        for (var j = 0; j < rgs.length; j++) {
-          if (decodedCache.has(rgs[j])) { found = true; return; }
-        }
-      });
-      return found;
+    // Longest a LOD change waits for the new level's tiles before drawing
+    // it anyway, so a tile that never builds cannot hold the old level.
+    function getMaxHoldMs() {
+      var v = TILING.MAX_HOLD_MS;
+      return (typeof v === "number" && v >= 0) ? v : 1500;
     }
 
-    function getMinHoldMs() {
-      var v = TILING.MIN_HOLD_MS;
-      return (typeof v === "number" && v >= 0) ? v : 200;
-    }
-
-    // Layer(s) for the current viewport. While the LOD just switched to
-    // is still cold, the previous warm LOD is stacked underneath so the
-    // crossover is visible rather than a blank flash.
+    // Layer(s) for the current viewport.
+    //
+    // deck.gl finalises every layer missing from the list it is given,
+    // and a finalised instance cannot be initialised again ("assertion
+    // failed"). So memoised layers live only while they are in the list:
+    // an LOD left and later returned to gets a fresh TileLayer.
     function buildLodLayer(x, viewport) {
+      var out = buildLodLayers(x, viewport);
+      var listed = new Set([].concat(out || []).map(function (l) { return l.id; }));
+      layerMemo.forEach(function (m, id) {
+        if (!listed.has(id)) { layerMemo.delete(id); builtTiles.delete(id); }
+      });
+      // a new opacity reaches the cached tile layers on their next update
+      var opacity = ctx.getOpacity();
+      if (opacity !== lastOpacity) {
+        lastOpacity = opacity;
+        layerMemo.forEach(function (m) {
+          if (m.layer.internalState && typeof m.layer.setNeedsUpdate === "function") m.layer.setNeedsUpdate();
+        });
+      }
+      return out;
+    }
+
+    // When the TileLayer for the viewport changes (a new LOD, or outlines
+    // appearing or going as cells grow or shrink on screen), the one drawn
+    // so far stays until the new one has built every tile in view: both
+    // are listed, so deck builds the new one's tiles, and filterSubLayer()
+    // draws exactly one of the two in each frame. So a change neither
+    // blanks the map nor draws two translucent levels over each other.
+    // Once the new layer is complete it becomes the shown one and the old
+    // is dropped. A layer still incomplete after MAX_HOLD_MS is shown
+    // anyway.
+    function buildLodLayers(x, viewport) {
       if (!ready || !rgIndex || !window.A5) return null;
       var schedule = x.lod_resolutions || null;
       if (!schedule || schedule.length === 0) return null;
@@ -952,33 +1222,41 @@
       var R = TILING.getA5Resolution(viewport);
       var lod = TILING.pickLod(R, schedule);
       if (lod == null) return null;
-      if (lod !== lastBuiltLod) {
-        log("[a5view] lod=" + lod + " (R=" + R + ", zoom=" + (viewport.zoom || 0).toFixed(2) + ")");
-        lastBuiltLod = lod;
-        lodChangedAt = nowMs();
+
+      var current = buildLayerAtLod(x, lod, viewport);
+      var shown = shownId != null && layerMemo.get(shownId);
+      if (current == null || !shown || current.id === shownId) {
+        settle(current, R, viewport);
+        return current;
+      }
+      if (current.id !== pendingId) {
+        log("[a5view] " + shownId + " -> " + current.id + " pending (R=" + R + ", zoom=" + (viewport.zoom || 0).toFixed(2) + ")");
+        pendingId = current.id;
+        pendingSince = nowMs();
         if (holdTimer) clearTimeout(holdTimer);
         holdTimer = setTimeout(function () {
           holdTimer = null;
           if (ctx.onDataReady) ctx.onDataReady();
-        }, getMinHoldMs() + 32);
+        }, getMaxHoldMs() + 32);
       }
-
-      var current = buildLayerAtLod(x, lod, viewport);
-      if (current == null) return null;
-
-      var holdElapsed = (nowMs() - lodChangedAt) >= getMinHoldMs();
-      if (lodHasDecodedData(lod) && holdElapsed) {
-        prevWarmLod = lod;
+      if (layerReady(current) || nowMs() - pendingSince >= getMaxHoldMs()) {
+        settle(current, R, viewport);
         return current;
       }
-      // Skip the stacked hold at non-solid opacity: two LODs composited
-      // read visibly denser than the single layer the user expects.
-      if (ctx.getOpacity() < 1 - 1e-6) return current;
-      if (prevWarmLod != null && prevWarmLod !== lod) {
-        var prev = buildLayerAtLod(x, prevWarmLod, viewport);
-        if (prev) return [prev, current];
+      return [shown.layer, current];
+    }
+
+    // Draw `layer` (a TileLayer, or null) from now on.
+    function settle(layer, R, viewport) {
+      var lod = layer ? layer.props.a5Lod : null;
+      if (lod !== shownLod) {
+        log("[a5view] lod=" + lod + " (R=" + R + ", zoom=" + (viewport.zoom || 0).toFixed(2) + ")");
       }
-      return current;
+      shownId = layer ? layer.id : null;
+      shownLod = lod;
+      pendingId = null;
+      pendingSince = null;
+      if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
     }
 
     // Decoded row at a LOD for a hex cell id, or null. The per-LOD hex
@@ -1009,11 +1287,19 @@
       reset: reset,
       buildLodLayer: buildLodLayer,
       findRow: findRow,
-      currentLod: function () { return lastBuiltLod; },
+      // the LOD drawn, which hover looks cells up in
+      currentLod: function () { return shownLod; },
+      pendingLod: function () {
+        var m = pendingId != null && layerMemo.get(pendingId);
+        return m ? m.layer.props.a5Lod : null;
+      },
       isReady: function () { return ready; },
       stats: function () {
         return {
           loadVersion: loadVersion,
+          format: sourceFormat,
+          shownId: shownId,
+          pendingId: pendingId,
           rowGroups: rgIndex ? rgIndex.length : 0,
           decoded: decodedCache.size,
           pending: pendingDecodes.size,

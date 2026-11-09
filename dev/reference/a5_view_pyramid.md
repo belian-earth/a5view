@@ -2,9 +2,9 @@
 
 Reads a parquet file produced by
 [`a5_build_pyramid()`](https://belian-earth.github.io/a5view/dev/reference/a5_build_pyramid.md)
-and renders it through the same lazy row-group decoder as
+and renders it through the same lazy tile renderer as
 [`a5_view()`](https://belian-earth.github.io/a5view/dev/reference/a5_view.md)
-does for aggregated data. No data preparation or LOD construction
+uses for aggregated data. No data preparation or LOD construction
 happens at view time. Inside Shiny the file is served to the browser
 over HTTP with byte-range support, so only the footer and the row groups
 in view are transferred, however large the file; outside Shiny the bytes

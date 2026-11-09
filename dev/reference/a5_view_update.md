@@ -117,16 +117,15 @@ a5_view_update(
   - `"mean"`: each numeric payload column is averaged independently
     within the parent group. Best for scalar fields; blends colours in
     RGB space, which can mute embedding visualisations. When set to
-    `"rep_child"` or `"mean"`, the pyramid is built and written to
-    parquet by
-    [`a5pyramid::a5_write_pyramid()`](https://rdrr.io/pkg/a5pyramid/man/a5_write_pyramid.html),
-    with a spatial row-group index (see
-    [`a5_build_pyramid()`](https://belian-earth.github.io/a5view/dev/reference/a5_build_pyramid.md)).
-    The browser decodes only the row groups intersecting the viewport at
-    the level of detail matching the current zoom. Inside Shiny the
-    parquet file is served over HTTP with byte-range support, so only
-    the footer and the visible row groups are ever transferred;
-    elsewhere it is embedded in the widget as base64.
+    `"rep_child"` or `"mean"`, the pyramid is built in memory by
+    [`a5pyramid::a5_pyramid_arrow()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_arrow.html)
+    as Arrow tiles of nearby cells, with a spatial index (see
+    [`a5_build_pyramid()`](https://belian-earth.github.io/a5view/dev/reference/a5_build_pyramid.md)
+    to save one to a file). The browser decodes only the tiles
+    intersecting the viewport at the level of detail matching the
+    current zoom. Inside Shiny the tiles are served over HTTP, so only
+    the visible tiles are ever transferred; elsewhere they are embedded
+    in the widget, compressed. No file is written.
 
 - lod_step:
 
