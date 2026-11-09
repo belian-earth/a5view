@@ -55,10 +55,8 @@ prepare_data <- function(cells) {
 #' tiles of nearby cells, one row group each, and the file's metadata
 #' indexes every row group's LOD and bounding box, so the browser decodes
 #' only the row groups in view at the LOD for its zoom. The layout is
-#' a5pyramid's (its `FORMAT.md`), which the lazy renderer reads.
-#'
-#' Colour channels are stored as `uint8` and the fill value as `float32`,
-#' plenty for display and a tooltip readout; elevation stays `float64`.
+#' a5pyramid's (its `FORMAT.md`), which the lazy renderer reads. Column
+#' types are set by `pyramid_spec()`.
 #'
 #' @param prep Output of `prepare_view_data()`, with cells at one
 #'   resolution.
@@ -72,6 +70,52 @@ prepare_data <- function(cells) {
 #' @return The LODs in the file, ascending (the data resolution last).
 #' @noRd
 write_pyramid <- function(prep, path, aggregate, lod_step, meta = NULL) {
+  spec <- pyramid_spec(prep, lod_step, meta)
+  with_pyramid_errors(
+    a5pyramid::a5_write_pyramid(
+      prep$df, path,
+      lods = spec$lods,
+      aggregate = aggregate,
+      types = spec$types,
+      metadata = spec$metadata
+    )
+  )
+  spec$all_lods
+}
+
+#' Build prepared view data as an a5pyramid Arrow table
+#'
+#' The pyramid of `write_pyramid()`, from [a5pyramid::a5_pyramid_arrow()]
+#' and held in memory rather than written: one record batch per tile, in
+#' the order of the file's row groups, with the index in the schema
+#' metadata. `a5_view()` and `a5_view_update()` draw pyramids this way, so
+#' no temp file is written.
+#' @inheritParams write_pyramid
+#' @return List with `table` (an Arrow `Table`) and `lods` (its LODs,
+#'   ascending).
+#' @noRd
+pyramid_arrow <- function(prep, aggregate, lod_step) {
+  spec <- pyramid_spec(prep, lod_step)
+  tbl <- with_pyramid_errors(
+    a5pyramid::a5_pyramid_arrow(
+      prep$df,
+      lods = spec$lods,
+      aggregate = aggregate,
+      types = spec$types
+    )
+  )
+  list(table = tbl, lods = spec$all_lods)
+}
+
+#' The a5pyramid arguments for a view's pyramid
+#'
+#' Colour channels are stored as `uint8` and the fill value as `float32`,
+#' plenty for display and a tooltip readout; elevation stays `float64`.
+#' @inheritParams write_pyramid
+#' @return List with `lods` (the coarser LODs to build), `all_lods` (every
+#'   LOD, ascending), `types` and `metadata`.
+#' @noRd
+pyramid_spec <- function(prep, lod_step, meta = NULL) {
   data_resolution <- prep$data_resolution
   if (length(data_resolution) > 1L) {
     cli::cli_abort(c(
@@ -96,15 +140,15 @@ write_pyramid <- function(prep, path, aggregate, lod_step, meta = NULL) {
     meta$lod_resolutions <- as.list(all_lods)
     metadata <- c(a5view_meta = yyjsonr::write_json_str(meta, auto_unbox = TRUE))
   }
+  list(lods = lods, all_lods = all_lods, types = types, metadata = metadata)
+}
 
+#' Evaluate an a5pyramid build, explaining duplicated cells in a5view's
+#' terms
+#' @noRd
+with_pyramid_errors <- function(expr) {
   tryCatch(
-    a5pyramid::a5_write_pyramid(
-      prep$df, path,
-      lods = lods,
-      aggregate = aggregate,
-      types = types,
-      metadata = metadata
-    ),
+    expr,
     a5pyramid_error_input = function(e) {
       if (!grepl("more than once", conditionMessage(e), fixed = TRUE)) stop(e)
       cli::cli_abort(c(
@@ -113,7 +157,6 @@ write_pyramid <- function(prep, path, aggregate, lod_step, meta = NULL) {
       ), parent = e, call = NULL)
     }
   )
-  all_lods
 }
 
 #' The coarser LODs of a pyramid: every `lod_step`-th resolution below the
@@ -365,17 +408,20 @@ payload_arrow_table <- function(pdf, has_fill_value,
 #' Encode prepared view data for transfer to the browser
 #'
 #' `aggregate = "none"` ships the leaf rows as base64 Arrow IPC.
-#' Otherwise a LOD pyramid is written to parquet by `write_pyramid()`, with
-#' a row-group index so the browser decodes only what the viewport
-#' needs. Inside Shiny the parquet file is served over HTTP with Range
-#' support (see `serve_parquet_file()`); elsewhere it is inlined as
-#' base64.
+#' Otherwise a LOD pyramid is built in memory by `pyramid_arrow()`, one
+#' record batch per tile, with an index so the browser decodes only the
+#' tiles the viewport needs. Inside Shiny the tiles are served over HTTP,
+#' one per request; elsewhere they are inlined (see
+#' `arrow_pyramid_payload()`). No file is written.
 #' @param session Shiny session or `NULL`.
-#' @return List with `arrow_ipc`, `parquet` (one of which is `NULL`)
+#' @param output_id The Shiny output the widget renders to, or `NULL` to
+#'   look it up while rendering. Each output serves one pyramid at a time.
+#' @return List with `arrow_ipc`, `pyramid` (one of which is `NULL`)
 #'   and `lod_resolutions`.
 #' @noRd
 encode_view_data <- function(prep, aggregate, lod_step,
-                             tooltip_cols = character(), session = NULL) {
+                             tooltip_cols = character(), session = NULL,
+                             output_id = NULL) {
   if (aggregate == "none") {
     tbl <- payload_arrow_table(
       prep$df,
@@ -387,17 +433,16 @@ encode_view_data <- function(prep, aggregate, lod_step,
     ipc_raw <- arrow::write_to_raw(tbl, format = "stream")
     return(list(
       arrow_ipc = base64enc::base64encode(ipc_raw),
-      parquet = NULL,
+      pyramid = NULL,
       lod_resolutions = NULL
     ))
   }
 
-  path <- tempfile("a5view-", fileext = ".parquet")
-  lods <- write_pyramid(prep, path, aggregate, lod_step)
-  c(
-    list(arrow_ipc = NULL),
-    parquet_payload(path, session = session, temp = TRUE),
-    list(lod_resolutions = as.list(lods))
+  pyr <- pyramid_arrow(prep, aggregate, lod_step)
+  list(
+    arrow_ipc = NULL,
+    pyramid = arrow_pyramid_payload(pyr$table, session, output_id),
+    lod_resolutions = as.list(pyr$lods)
   )
 }
 

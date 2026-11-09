@@ -1,4 +1,4 @@
-# Tests for R/serve.R: serving pyramid parquet files inside Shiny
+# Tests for R/serve.R: encoding pyramids for the widget and serving them inside Shiny
 
 make_file <- function(n = 1000L) {
   path <- tempfile(fileext = ".bin")
@@ -56,81 +56,138 @@ test_that("range handler clamps past-the-end and rejects unsatisfiable ranges", 
 
 # --- parquet_payload ---
 
-mock_session <- function() {
-  env <- new.env()
-  env$registered <- list()
-  env$ended <- list()
-  list(
-    registerDataObj = function(name, data, filter) {
-      env$registered[[name]] <- list(data = data, filter = filter)
-      paste0("session/x/dataobj/", name)
-    },
-    onSessionEnded = function(fn) env$ended <- c(env$ended, fn),
-    env = env
-  )
-}
-
 test_that("parquet_payload inlines base64 outside Shiny", {
   path <- make_file(64L)
   out <- parquet_payload(path)
-  expect_null(out$parquet$url)
-  expect_equal(base64enc::base64decode(out$parquet$b64), as.raw((1:64) %% 256L))
+  expect_identical(out$pyramid$format, "parquet")
+  expect_null(out$pyramid$url)
+  expect_equal(base64enc::base64decode(out$pyramid$b64), as.raw((1:64) %% 256L))
   expect_true(file.exists(path))
-})
-
-test_that("parquet_payload unlinks temp files after inlining", {
-  path <- make_file(64L)
-  out <- parquet_payload(path, temp = TRUE)
-  expect_true(nzchar(out$parquet$b64))
-  expect_false(file.exists(path))
 })
 
 test_that("parquet_payload registers a served URL with a Shiny session", {
   path <- make_file(64L)
   s <- mock_session()
   out <- parquet_payload(path, session = s)
-  expect_match(out$parquet$url, "^session/x/dataobj/a5view-")
-  expect_equal(out$parquet$bytes, 64)
-  expect_null(out$parquet$b64)
+  expect_identical(out$pyramid$format, "parquet")
+  expect_match(out$pyramid$url, "^session/x/dataobj/a5view-")
+  expect_equal(out$pyramid$bytes, 64)
+  expect_null(out$pyramid$b64)
   reg <- s$env$registered[[1]]
   expect_equal(reg$data, path)
   expect_identical(reg$filter, parquet_range_handler)
   expect_length(s$env$ended, 0L)
 })
 
-test_that("parquet_payload defers temp-file cleanup to session end", {
-  path <- make_file(64L)
-  s <- mock_session()
-  parquet_payload(path, session = s, temp = TRUE)
-  expect_true(file.exists(path))
-  expect_length(s$env$ended, 1L)
-  s$env$ended[[1]]()
-  expect_false(file.exists(path))
-})
-
 test_that("parquet_payload falls back to inline for sessions without registerDataObj", {
   path <- make_file(64L)
   out <- parquet_payload(path, session = list(sendCustomMessage = function(...) NULL))
-  expect_true(nzchar(out$parquet$b64))
+  expect_true(nzchar(out$pyramid$b64))
+})
+
+# --- arrow_pyramid_payload ---
+
+small_cells <- function() {
+  unique(a5R::a5_lonlat_to_cell(
+    seq(-1, 1, length.out = 20), seq(-1, 1, length.out = 20), resolution = 6
+  ))
+}
+
+small_pyramid <- function() {
+  cells <- small_cells()
+  prep <- prepare_view_data(cells, rlang::quo(seq_along(cells)), FALSE, "Viridis")
+  pyramid_arrow(prep, "rep_child", 1L)$table
+}
+
+tile_request <- function(query) list(QUERY_STRING = query)
+
+test_that("arrow_pyramid_payload inlines one deflated IPC stream outside Shiny", {
+  tbl <- small_pyramid()
+  out <- arrow_pyramid_payload(tbl)
+  expect_identical(out$format, "arrow")
+  expect_null(out$url)
+  ipc <- memDecompress(base64enc::base64decode(out$b64), "gzip")
+  back <- arrow::read_ipc_stream(ipc, as_data_frame = FALSE)
+  expect_identical(back$metadata$a5pyramid, tbl$metadata$a5pyramid)
+  expect_identical(back$metadata$a5_index, "1.0")
+  expect_identical(
+    length(arrow::as_record_batch_reader(back)$batches()),
+    length(arrow::as_record_batch_reader(tbl)$batches())
+  )
+})
+
+test_that("arrow_pyramid_payload serves one tile per request inside Shiny", {
+  tbl <- small_pyramid()
+  batches <- arrow::as_record_batch_reader(tbl)$batches()
+  s <- mock_session()
+  out <- arrow_pyramid_payload(tbl, session = s, output_id = "map")
+  expect_identical(out$format, "arrow")
+  expect_match(out$url, "^session/x/dataobj/a5view-tiles-map\\?")
+  expect_identical(out$tiles, length(batches))
+  expect_identical(out$index, tbl$metadata$a5pyramid)
+  expect_identical(out$a5_index, "1.0")
+  expect_null(out$b64)
+
+  reg <- s$env$registered[["a5view-tiles-map"]]
+  expect_identical(reg$filter, arrow_tile_handler)
+  last <- length(batches) - 1L
+  res <- reg$filter(reg$data, tile_request(paste0("?w=&nonce=1&tile=", last)))
+  expect_equal(res$status, 200L)
+  expect_equal(res$headers[["Content-Length"]], as.character(length(res$content)))
+  tile <- arrow::read_ipc_stream(memDecompress(res$content, "gzip"), as_data_frame = FALSE)
+  # the tile is the last record batch, without the index
+  expect_length(tile$metadata, 0L)
+  expect_true(tile$Equals(arrow::Table$create(batches[[last + 1L]])$ReplaceSchemaMetadata(
+    stats::setNames(list(), character())
+  )))
+})
+
+test_that("arrow_tile_handler refuses missing and out-of-range tiles", {
+  tiles <- list(as.raw(1:3), as.raw(4:6))
+  expect_equal(arrow_tile_handler(tiles, tile_request("?tile=1"))$content, as.raw(4:6))
+  for (q in c("", "?w=", "?tile=2", "?tile=-1", "?tile=x")) {
+    expect_equal(arrow_tile_handler(tiles, tile_request(q))$status, 404L, label = q)
+  }
+  expect_equal(arrow_tile_handler(tiles, list())$status, 404L)
+})
+
+test_that("a later pyramid for an output replaces the earlier one", {
+  s <- mock_session()
+  arrow_pyramid_payload(small_pyramid(), session = s, output_id = "map")
+  arrow_pyramid_payload(small_pyramid(), session = s, output_id = "map")
+  expect_named(s$env$registered, "a5view-tiles-map")
+  # without an output id, pyramids are named by their content
+  arrow_pyramid_payload(small_pyramid(), session = s)
+  expect_length(s$env$registered, 2L)
 })
 
 # --- integration through the exported functions ---
 
-test_that("a5_view_update serves the pyramid by URL when the session can", {
-  cells <- unique(a5R::a5_lonlat_to_cell(seq(-1, 1, length.out = 20), seq(-1, 1, length.out = 20), resolution = 6))
+test_that("a5_view_update serves the pyramid's tiles by URL when the session can", {
+  cells <- small_cells()
   captured <- NULL
   s <- mock_session()
   s$sendCustomMessage <- function(type, message) captured <<- message
   a5_view_update(s, "map", cells, fill = seq_along(cells), aggregate = "rep_child")
-  expect_match(captured$parquet$url, "dataobj")
-  expect_true(captured$parquet$bytes > 0)
+  expect_identical(captured$pyramid$format, "arrow")
+  expect_match(captured$pyramid$url, "dataobj/a5view-tiles-map")
+  expect_true(captured$pyramid$tiles > 0)
   expect_null(captured$arrow_ipc)
   expect_true(length(captured$lod_resolutions) > 1L)
 })
 
 test_that("a5_view inlines the pyramid outside Shiny", {
-  cells <- unique(a5R::a5_lonlat_to_cell(seq(-1, 1, length.out = 20), seq(-1, 1, length.out = 20), resolution = 6))
-  w <- a5_view(cells, aggregate = "mean")
-  expect_true(nzchar(w$x$parquet$b64))
-  expect_null(w$x$parquet$url)
+  w <- a5_view(small_cells(), aggregate = "mean")
+  expect_identical(w$x$pyramid$format, "arrow")
+  expect_true(nzchar(w$x$pyramid$b64))
+  expect_null(w$x$pyramid$url)
+  expect_null(w$x$arrow_ipc)
+})
+
+test_that("a5_view_pyramid still reads the Parquet file", {
+  path <- withr::local_tempfile(fileext = ".parquet")
+  a5_build_pyramid(small_cells(), path, aggregate = "mean")
+  w <- a5_view_pyramid(path)
+  expect_identical(w$x$pyramid$format, "parquet")
+  expect_true(nzchar(w$x$pyramid$b64))
 })

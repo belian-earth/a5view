@@ -134,14 +134,14 @@ visualisations.
 \item \code{"mean"}: each numeric payload column is averaged independently
 within the parent group. Best for scalar fields; blends colours
 in RGB space, which can mute embedding visualisations.
-When set to \code{"rep_child"} or \code{"mean"}, the pyramid is built and
-written to parquet by \code{\link[a5pyramid:a5_write_pyramid]{a5pyramid::a5_write_pyramid()}}, with a
-spatial row-group index (see \code{\link[=a5_build_pyramid]{a5_build_pyramid()}}). The browser decodes only
-the row groups intersecting the viewport at the level of detail
-matching the current zoom. Inside Shiny the parquet file is served
-over HTTP with byte-range support, so only the footer and the
-visible row groups are ever transferred; elsewhere it is embedded
-in the widget as base64.
+When set to \code{"rep_child"} or \code{"mean"}, the pyramid is built in
+memory by \code{\link[a5pyramid:a5_pyramid_arrow]{a5pyramid::a5_pyramid_arrow()}} as Arrow tiles of nearby
+cells, with a spatial index (see \code{\link[=a5_build_pyramid]{a5_build_pyramid()}} to save one to
+a file). The browser decodes only the tiles intersecting the
+viewport at the level of detail matching the current zoom. Inside
+Shiny the tiles are served over HTTP, so only the visible tiles are
+ever transferred; elsewhere they are embedded in the widget,
+compressed. No file is written.
 }}
 
 \item{lod_step}{Integer >= 1, gap between successive precomputed

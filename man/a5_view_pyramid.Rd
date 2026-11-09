@@ -79,7 +79,7 @@ An htmlwidget.
 }
 \description{
 Reads a parquet file produced by \code{\link[=a5_build_pyramid]{a5_build_pyramid()}} and renders it
-through the same lazy row-group decoder as \code{\link[=a5_view]{a5_view()}} does for
+through the same lazy tile renderer as \code{\link[=a5_view]{a5_view()}} uses for
 aggregated data. No data preparation or LOD construction happens at
 view time. Inside Shiny the file is served to the browser over HTTP
 with byte-range support, so only the footer and the row groups in
